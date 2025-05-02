@@ -1,9 +1,15 @@
 import os
-import time
+from telegram import Bot
+from telegram.constants import ParseMode
 
-print("Бот San Juan Bridge запущен")
+bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+channel_id = "@sanjuan_online"
 
-# Простейший имитационный цикл работы бота
-while True:
-    print("🔔 Проверка новостей и публикация...")
-    time.sleep(60)  # Подождать 60 секунд
+bot = Bot(token=bot_token)
+
+# Тестовое сообщение
+bot.send_message(
+    chat_id=channel_id,
+    text="✅ *Тестовая публикация:* San Juan Bot успешно запущен!",
+    parse_mode=ParseMode.MARKDOWN
+)
