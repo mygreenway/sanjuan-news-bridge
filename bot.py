@@ -1,139 +1,102 @@
 import os
 import asyncio
 import feedparser
+import requests
 from telegram import Bot
 from telegram.constants import ParseMode
-from openai import AsyncOpenAI
+from openai import OpenAI
+from datetime import datetime
+from html import escape
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHANNEL_ID = "@sanjuan_online"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 bot = Bot(token=BOT_TOKEN)
-openai = AsyncOpenAI(api_key=OPENAI_API_KEY)
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-# RSS-источники Испании
 RSS_FEEDS = [
-    "https://e00-elmundo.uecdn.es/elmundo/rss/portada.xml",
     "https://feeds.elpais.com/mrss-s/pages/ep/site/elpais.com/portada",
+    "https://e00-elmundo.uecdn.es/elmundo/rss/portada.xml",
     "https://www.rtve.es/rss/portal/rss.xml",
     "https://www.20minutos.es/rss/",
-    "https://www.europapress.es/rss/rss.aspx"
+    "https://www.lavanguardia.com/mvc/feed/rss/home",
+    "https://www.eldiario.es/rss/",
+    "https://www.abc.es/rss/feeds/abcPortada.xml",
+    "https://www.larazon.es/rss/",
+    "https://okdiario.com/feed",
+    "https://www.publico.es/rss",
+    "https://www.europapress.es/rss/rss.aspx",
+    "https://cadenaser.com/feed/",
+    "https://www.cope.es/rss/rss.xml",
+    "https://www.elconfidencial.com/rss/ultimas_noticias.xml",
 ]
 
-# Уникальные заголовки, чтобы не повторять публикации
+TWITTER_RSS = [
+    "https://rsshub.app/twitter/user/sanchezcastejon",
+    "https://rsshub.app/twitter/user/Yolanda_Diaz_",
+    "https://rsshub.app/twitter/user/AlbertoNunezFeijoo",
+    "https://rsshub.app/twitter/user/KingFelipeVI",
+]
+
 published_titles = set()
 
-# Функция для определения эмодзи и флага
-def detect_emoji(text):
-    text = text.lower()
-    icon = "📰"
-    flag = "🇪🇸"
+async def generate_post_with_gpt(title, summary, link):
+    prompt = f"""
+    Redacta una publicación para Telegram basada en esta noticia.
+    Usa estilo atractivo de canal de noticias: incluye título destacado, resumen expandido, y añade emojis apropiados según el tema.
+    Además, inserta el enlace dentro del texto, usando frases como "Leer más" o "Saber más", en lugar de colocarlo aparte.
+    Escribe sólo en español.
 
-    # Тематический эмодзи
-    if any(word in text for word in ["electricidad", "energía", "apagón", "eléctrico"]):
-        icon = "⚡"
-    elif any(word in text for word in ["política", "gobierno", "elecciones", "parlamento"]):
-        icon = "🏛️"
-    elif any(word in text for word in ["economía", "empleo", "precios", "inflación"]):
-        icon = "💰"
-    elif any(word in text for word in ["accidente", "incendio", "policía", "muerte", "suceso"]):
-        icon = "🚨"
-    elif any(word in text for word in ["lluvia", "tormenta", "clima", "temperatura", "calor"]):
-        icon = "🌧️"
-
-    # Флаг по стране
-    if "españa" in text:
-        flag = "🇪🇸"
-    elif "francia" in text:
-        flag = "🇫🇷"
-    elif "alemania" in text:
-        flag = "🇩🇪"
-    elif "italia" in text:
-        flag = "🇮🇹"
-    elif "reino unido" in text or "gran bretaña" in text:
-        flag = "🇬🇧"
-    elif "eeuu" in text or "estados unidos" in text or "usa" in text:
-        flag = "🇺🇸"
-    elif "rusia" in text:
-        flag = "🇷🇺"
-    elif "ucrania" in text:
-        flag = "🇺🇦"
-    elif "marruecos" in text:
-        flag = "🇲🇦"
-    elif "china" in text:
-        flag = "🇨🇳"
-    elif "argentina" in text:
-        flag = "🇦🇷"
-    elif "méxico" in text or "mexico" in text:
-        flag = "🇲🇽"
-
-    return f"{icon} {flag}"
-
-# Расширяем краткое описание с помощью GPT
-async def improve_summary_with_gpt(title, summary):
-    prompt = (
-        f"Mejora y amplía este resumen de noticia en español. No uses encabezados como 'Título' ni 'Resumen'. "
-        f"Devuelve solo un texto claro, completo y atractivo para publicación en Telegram.\n\n"
-        f"Título: {title}\n\nResumen: {summary}"
-    )
+    Título: {title}
+    Resumen: {summary}
+    Enlace: {link}
+    """
+    
     try:
-        response = await openai.chat.completions.create(
-            model="gpt-4",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
-            max_tokens=400
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "Eres un redactor profesional de noticias para Telegram."},
+                {"role": "user", "content": prompt},
+            ]
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
-        print("GPT error:", e)
-        return summary
+        print("❌ GPT error:", e)
+        return None
 
-# Основной процесс
 async def fetch_and_publish():
-    for url in RSS_FEEDS:
+    for url in RSS_FEEDS + TWITTER_RSS:
         feed = feedparser.parse(url)
         for entry in feed.entries[:1]:
             title = entry.get("title", "")
             link = entry.get("link", "")
-            summary = entry.get("summary", "")[:700]
-            image_url = ""
+            summary = entry.get("summary", "")[:500]
 
             if title in published_titles:
                 continue
 
-            # Поиск изображения
-            if "media_content" in entry:
-                image_url = entry.media_content[0]["url"]
-            elif "image" in entry:
-                image_url = entry.image.get("href", "")
-
-            emoji = detect_emoji(title + summary)
-            improved_summary = await improve_summary_with_gpt(title, summary)
-
-            hashtags = "#Noticias #España #SanJuan"
-            text = (
-                f"<b>{emoji} {title}</b>\n\n"
-                f"{improved_summary}\n\n"
-                f"👉 Haz clic <a href=\"{link}\">aquí para leer la noticia completa</a>\n\n"
-                f"{hashtags}"
-            )
+            formatted_post = await generate_post_with_gpt(title, summary, link)
+            
+            if not formatted_post:
+                continue
 
             try:
-                if image_url:
-                    await bot.send_photo(chat_id=CHANNEL_ID, photo=image_url, caption=text, parse_mode=ParseMode.HTML)
-                else:
-                    await bot.send_message(chat_id=CHANNEL_ID, text=text, parse_mode=ParseMode.HTML)
-
+                await bot.send_message(
+                    chat_id=CHANNEL_ID,
+                    text=f"{formatted_post}\n\n#Noticias #España #SanJuan",
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=False
+                )
                 published_titles.add(title)
                 await asyncio.sleep(5)
             except Exception as e:
-                print("❌ Telegram error:", e)
+                print("Telegram error:", e)
 
-# Цикл публикации каждые 30 минут
 async def main_loop():
     while True:
-        print("🔄 Comprobando noticias...")
+        print("🔄 Buscando noticias...")
         await fetch_and_publish()
         await asyncio.sleep(1800)
 
