@@ -2,17 +2,15 @@ import os
 import asyncio
 import feedparser
 import openai
-import requests
 from telegram import Bot
 from telegram.constants import ParseMode
 
-# Ключ OpenAI
-openai.api_key = os.getenv("OPENAI_API_KEY")
-
-# Телеграм бот
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 CHANNEL_ID = "@sanjuan_online"
 bot = Bot(token=BOT_TOKEN)
+
+openai.api_key = OPENAI_API_KEY
 
 # RSS-источники
 RSS_FEEDS = [
@@ -25,72 +23,62 @@ RSS_FEEDS = [
 
 published_titles = set()
 
-async def mejorar_texto_con_gpt(texto_original):
+async def improve_summary_with_gpt(title, summary):
     try:
+        prompt = f"Resumen claro, completo y atractivo en español sobre esta noticia:\n\nTítulo: {title}\n\nContenido: {summary}"
         response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",  # Или "gpt-4o", если доступен
+            model="gpt-4o",
             messages=[
-                {"role": "system", "content": "Eres un redactor profesional de noticias. Resume esta noticia en español de forma clara, completa y atractiva."},
-                {"role": "user", "content": texto_original}
+                {"role": "system", "content": "Eres un periodista español. Escribe publicaciones informativas y fáciles de entender."},
+                {"role": "user", "content": prompt}
             ],
-            max_tokens=600,
+            max_tokens=500,
             temperature=0.7
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
-        print("GPT error:", e)
-        return texto_original
+        print("❌ GPT error:", e)
+        return summary  # fallback
 
 async def fetch_and_publish():
     for url in RSS_FEEDS:
         feed = feedparser.parse(url)
-        for entry in feed.entries[:1]:  # Только одна новость из источника
+        for entry in feed.entries[:1]:
             title = entry.get("title", "")
             link = entry.get("link", "")
-            raw_summary = entry.get("summary", "")[:1000]
+            summary = entry.get("summary", "")[:700]
             image_url = ""
 
             if title in published_titles:
                 continue
 
-            # Обработка изображения
+            # Извлекаем изображение
             if "media_content" in entry:
-                image_url = entry.media_content[0].get("url", "")
-            elif "image" in entry and isinstance(entry.image, dict):
+                image_url = entry.media_content[0]["url"]
+            elif "image" in entry:
                 image_url = entry.image.get("href", "")
 
-            # Генерируем улучшенное описание
-            resumen = await mejorar_texto_con_gpt(raw_summary)
+            improved_summary = await asyncio.to_thread(improve_summary_with_gpt, title, summary)
 
-            # Оформление поста
             hashtags = "#Noticias #España #SanJuan"
-            mensaje = f"<b>{title}</b>\n\n{resumen}\n\n<a href='{link}'>Leer más</a>\n\n{hashtags}"
+            text = f"<b>{title}</b>\n\n{improved_summary}\n\n<a href='{link}'>Leer más</a>\n\n{hashtags}"
 
-            # Публикация
             try:
                 if image_url:
-                    await bot.send_photo(
-                        chat_id=CHANNEL_ID,
-                        photo=image_url,
-                        caption=mensaje,
-                        parse_mode=ParseMode.HTML
-                    )
+                    await bot.send_photo(chat_id=CHANNEL_ID, photo=image_url, caption=text, parse_mode=ParseMode.HTML)
                 else:
-                    await bot.send_message(
-                        chat_id=CHANNEL_ID,
-                        text=mensaje,
-                        parse_mode=ParseMode.HTML
-                    )
+                    await bot.send_message(chat_id=CHANNEL_ID, text=text, parse_mode=ParseMode.HTML)
+
                 published_titles.add(title)
                 await asyncio.sleep(5)
             except Exception as e:
-                print("Telegram error:", e)
+                print("❌ Telegram error:", e)
 
 async def main_loop():
     while True:
         print("🔄 Проверка новостей...")
         await fetch_and_publish()
-        await asyncio.sleep(1800)
+        await asyncio.sleep(1800)  # каждые 30 минут
 
 if __name__ == "__main__":
     asyncio.run(main_loop())
