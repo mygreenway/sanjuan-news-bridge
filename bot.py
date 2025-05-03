@@ -30,7 +30,6 @@ RSS_FEEDS = [
     "https://www.lasprovincias.es/rss/2.0/portada/index.rss"
 ]
 
-# Заголовки уже опубликованных новостей
 published_titles = set()
 
 # Определение эмодзи и флага
@@ -84,16 +83,15 @@ def get_full_article(url):
         return trafilatura.extract(downloaded)
     return ""
 
-# Улучшение и сжатие текста GPT-4o
+# Генерация сжатой версии новости с GPT-4o
 async def improve_summary_with_gpt(title, full_article, link):
     prompt = (
-        f"Resume esta noticia de forma clara, completa y compacta para ser publicada en un canal de Telegram. "
-        f"No repitas el título. Mantén un tono informativo. "
-        f"Limita el texto a dos párrafos como máximo, sin perder los datos importantes. "
-        f"Incorpora el siguiente enlace en una palabra clave si es posible: {link}\n\n"
+        f"Reescribe esta noticia de forma clara, completa y compacta para una publicación en un canal de Telegram. "
+        f"Limita el texto a 2 párrafos y 800 caracteres. Resume solo lo esencial. "
+        f"Evita repeticiones, no incluyas encabezados y no repitas el título. "
+        f"Incorpora el siguiente enlace en una palabra clave dentro del texto: {link}\n\n"
         f"Título: {title}\n\nTexto de la noticia:\n{full_article[:3000]}"
     )
-
     try:
         response = await openai.chat.completions.create(
             model="gpt-4o",
@@ -106,7 +104,7 @@ async def improve_summary_with_gpt(title, full_article, link):
         print("GPT error:", e)
         return full_article[:800]
 
-# Публикация новостей
+# Основной цикл обработки
 async def fetch_and_publish():
     for url in RSS_FEEDS:
         feed = feedparser.parse(url)
@@ -114,20 +112,25 @@ async def fetch_and_publish():
             title = entry.get("title", "")
             link = entry.get("link", "")
             summary = entry.get("summary", "")
-            image_url = ""
 
             if title in published_titles:
                 continue
 
-            # Поиск изображения
+            # Поиск изображения с логированием источника
+            image_url = ""
             if "media_content" in entry:
-                image_url = entry.media_content[0].get("url", "")
+                image_url = entry.media_content[0]["url"]
+            elif "image" in entry:
+                image_url = entry.image.get("href", "")
             elif "media_thumbnail" in entry:
                 image_url = entry.media_thumbnail[0].get("url", "")
             elif "summary" in entry:
                 match = re.search(r'<img[^>]+src="([^">]+)"', entry.summary)
                 if match:
                     image_url = match.group(1)
+
+            print(f"📰 Fuente: {url}")
+            print(f"🔗 Imagen: {image_url or 'No encontrada'}")
 
             emoji = detect_emoji(title + summary)
             full_article = get_full_article(link)
@@ -154,7 +157,7 @@ async def fetch_and_publish():
             except Exception as e:
                 print("❌ Telegram error:", e)
 
-# Основной цикл
+# Цикл публикации
 async def main_loop():
     while True:
         print("🔄 Comprobando noticias...")
