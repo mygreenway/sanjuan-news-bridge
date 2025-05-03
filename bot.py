@@ -1,12 +1,9 @@
 import os
 import asyncio
 import feedparser
-import requests
 from telegram import Bot
 from telegram.constants import ParseMode
 from openai import OpenAI
-from datetime import datetime
-from html import escape
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHANNEL_ID = "@sanjuan_online"
@@ -15,6 +12,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 bot = Bot(token=BOT_TOKEN)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
+# RSS источники: крупные испанские издания и Twitter-политики
 RSS_FEEDS = [
     "https://feeds.elpais.com/mrss-s/pages/ep/site/elpais.com/portada",
     "https://e00-elmundo.uecdn.es/elmundo/rss/portada.xml",
@@ -43,24 +41,20 @@ published_titles = set()
 
 async def generate_post_with_gpt(title, summary, link):
     prompt = f"""
-    Eres un redactor profesional para un canal de noticias en Telegram dirigido a una audiencia española.
-    Tu tarea es redactar una publicación clara, profesional y atractiva basada en esta noticia.
+Eres un redactor profesional de noticias en español para Telegram. Basado en el siguiente titular, resumen y enlace, redacta una publicación clara, estructurada y atractiva para un canal informativo.
 
-    Requisitos:
-    - Comienza con un título impactante sin usar etiquetas como "Título:"
-    - Escribe un resumen expandido, objetivo y bien estructurado
-    - Mantén un tono informativo y periodístico
-    - Añade emojis solo si son apropiados y relevantes
-    - Inserta el enlace al final de una frase como "Leer más" usando formato Markdown: [Leer más]({link})
-    - No muestres la URL completa en el texto
-    - Escribe únicamente en español
+Requisitos:
+- Encabezado con un emoji relevante + título en negrita.
+- 1–2 párrafos informativos.
+- Enlace oculto в виде [Leer más](URL).
+- Без фраз вроде "Título:", "Resumen:", просто оформленный пост.
+- В конце хештеги: #Noticias #España #SanJuan
+- Пиши только по-испански. Без формальностей.
 
-    Noticia:
-    Título: {title}
-    Resumen: {summary}
-    Enlace: {link}
-    """
-
+Título: {title}
+Resumen: {summary}
+Enlace: {link}
+"""
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -81,22 +75,35 @@ async def fetch_and_publish():
             title = entry.get("title", "")
             link = entry.get("link", "")
             summary = entry.get("summary", "")[:500]
+            image_url = ""
 
             if title in published_titles:
                 continue
 
+            if "media_content" in entry:
+                image_url = entry.media_content[0]["url"]
+            elif "image" in entry:
+                image_url = entry.image.get("href", "")
+
             formatted_post = await generate_post_with_gpt(title, summary, link)
-            
             if not formatted_post:
                 continue
 
             try:
-                await bot.send_message(
-                    chat_id=CHANNEL_ID,
-                    text=f"{formatted_post}\n\n#Noticias #España #SanJuan",
-                    parse_mode=ParseMode.MARKDOWN,
-                    disable_web_page_preview=False
-                )
+                if image_url:
+                    await bot.send_photo(
+                        chat_id=CHANNEL_ID,
+                        photo=image_url,
+                        caption=formatted_post,
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                else:
+                    await bot.send_message(
+                        chat_id=CHANNEL_ID,
+                        text=formatted_post,
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+
                 published_titles.add(title)
                 await asyncio.sleep(5)
             except Exception as e:
