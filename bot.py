@@ -82,8 +82,10 @@ def get_full_article(url):
 async def improve_summary_with_gpt(title, full_article, link):
     prompt = (
         f"Resume esta noticia de forma muy breve y clara para una publicación en Telegram. "
-        f"Limita el texto a máximo 400 caracteres. Da solo lo esencial en 1 o 2 frases. "
-        f"Incorpora el siguiente enlace en una palabra clave dentro del texto: {link}.\n\n"
+        f"Usa como máximo 400 caracteres y escribe 1 o 2 frases con la información esencial. "
+        f"No uses encabezados, no repitas el título. "
+        f"Incorpora el siguiente enlace en una palabra clave usando el formato HTML así: "
+        f'<a href=\"{link}\">palabra</a>.\n\n'
         f"Título: {title}\n\nTexto de la noticia:\n{full_article[:2000]}"
     )
 
@@ -110,7 +112,7 @@ async def fetch_and_publish():
             if title in published_titles:
                 continue
 
-            # Поиск изображения
+            # Поиск изображения из всех возможных источников
             image_url = ""
             if "media_content" in entry:
                 image_url = entry.media_content[0]["url"]
