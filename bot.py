@@ -43,16 +43,24 @@ published_titles = set()
 
 async def generate_post_with_gpt(title, summary, link):
     prompt = f"""
-    Redacta una publicación para Telegram basada en esta noticia.
-    Usa estilo atractivo de canal de noticias: incluye título destacado, resumen expandido, y añade emojis apropiados según el tema.
-    Además, inserta el enlace dentro del texto, usando frases como "Leer más" o "Saber más", en lugar de colocarlo aparte.
-    Escribe sólo en español.
+    Eres un redactor profesional para un canal de noticias en Telegram dirigido a una audiencia española.
+    Tu tarea es redactar una publicación clara, profesional y atractiva basada en esta noticia.
 
+    Requisitos:
+    - Comienza con un título impactante sin usar etiquetas como "Título:"
+    - Escribe un resumen expandido, objetivo y bien estructurado
+    - Mantén un tono informativo y periodístico
+    - Añade emojis solo si son apropiados y relevantes
+    - Inserta el enlace al final de una frase como "Leer más" usando formato Markdown: [Leer más]({link})
+    - No muestres la URL completa en el texto
+    - Escribe únicamente en español
+
+    Noticia:
     Título: {title}
     Resumen: {summary}
     Enlace: {link}
     """
-    
+
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -86,7 +94,7 @@ async def fetch_and_publish():
                 await bot.send_message(
                     chat_id=CHANNEL_ID,
                     text=f"{formatted_post}\n\n#Noticias #España #SanJuan",
-                    parse_mode=ParseMode.HTML,
+                    parse_mode=ParseMode.MARKDOWN,
                     disable_web_page_preview=False
                 )
                 published_titles.add(title)
