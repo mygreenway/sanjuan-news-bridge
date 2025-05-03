@@ -8,8 +8,8 @@ from openai import AsyncOpenAI
 import trafilatura
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-CHANNEL_ID = "@sanjuan_online"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+CHANNEL_IDS = ["@sanjuan_online", "@NoticiasEspanaHoy"]
 
 bot = Bot(token=BOT_TOKEN)
 openai = AsyncOpenAI(api_key=OPENAI_API_KEY)
@@ -112,7 +112,6 @@ async def fetch_and_publish():
             if title in published_titles:
                 continue
 
-            # Поиск изображения из всех возможных источников
             image_url = ""
             if "media_content" in entry:
                 image_url = entry.media_content[0]["url"]
@@ -143,10 +142,11 @@ async def fetch_and_publish():
             )
 
             try:
-                if image_url:
-                    await bot.send_photo(chat_id=CHANNEL_ID, photo=image_url, caption=text, parse_mode=ParseMode.HTML)
-                else:
-                    await bot.send_message(chat_id=CHANNEL_ID, text=text, parse_mode=ParseMode.HTML)
+                for chat_id in CHANNEL_IDS:
+                    if image_url:
+                        await bot.send_photo(chat_id=chat_id, photo=image_url, caption=text, parse_mode=ParseMode.HTML)
+                    else:
+                        await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML)
 
                 published_titles.add(title)
                 await asyncio.sleep(5)
