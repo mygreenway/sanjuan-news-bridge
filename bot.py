@@ -1,7 +1,6 @@
 import os
 import asyncio
 import feedparser
-import requests
 from telegram import Bot
 from telegram.constants import ParseMode
 from openai import AsyncOpenAI
@@ -13,7 +12,6 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 bot = Bot(token=BOT_TOKEN)
 openai = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-# RSS-источники
 RSS_FEEDS = [
     "https://e00-elmundo.uecdn.es/elmundo/rss/portada.xml",
     "https://feeds.elpais.com/mrss-s/pages/ep/site/elpais.com/portada",
@@ -54,17 +52,21 @@ async def fetch_and_publish():
             if title in published_titles:
                 continue
 
-            # Поиск изображения
             if "media_content" in entry:
                 image_url = entry.media_content[0]["url"]
             elif "image" in entry:
                 image_url = entry.image.get("href", "")
 
-            # Улучшение текста через GPT
             improved_summary = await improve_summary_with_gpt(title, summary)
 
             hashtags = "#Noticias #España #SanJuan"
-            text = f"<b>{title}</b>\n\n{improved_summary}\n\n<a href='{link}'>Leer más</a>\n\n{hashtags}"
+
+            text = (
+                f"<b>⚡ {title}</b>\n\n"
+                f"📍 {improved_summary}\n\n"
+                f"👉 <a href=\"{link}\">Leer la noticia completa</a>\n\n"
+                f"{hashtags}"
+            )
 
             try:
                 if image_url:
@@ -81,7 +83,7 @@ async def main_loop():
     while True:
         print("🔄 Comprobando noticias...")
         await fetch_and_publish()
-        await asyncio.sleep(1800)  # 30 минут
+        await asyncio.sleep(1800)
 
 if __name__ == "__main__":
     asyncio.run(main_loop())
