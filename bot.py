@@ -7,7 +7,6 @@ from telegram.constants import ParseMode
 from openai import AsyncOpenAI
 import trafilatura
 
-# Переменные окружения
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHANNEL_ID = "@sanjuan_online"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -15,7 +14,6 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 bot = Bot(token=BOT_TOKEN)
 openai = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-# RSS-источники
 RSS_FEEDS = [
     "https://e00-elmundo.uecdn.es/elmundo/rss/portada.xml",
     "https://feeds.elpais.com/mrss-s/pages/ep/site/elpais.com/portada",
@@ -32,7 +30,6 @@ RSS_FEEDS = [
 
 published_titles = set()
 
-# Определение эмодзи и флага
 def detect_emoji(text):
     text = text.lower()
     icon = "📰"
@@ -76,35 +73,32 @@ def detect_emoji(text):
 
     return f"{icon} {flag}"
 
-# Получение полной статьи
 def get_full_article(url):
     downloaded = trafilatura.fetch_url(url)
     if downloaded:
         return trafilatura.extract(downloaded)
     return ""
 
-# Генерация сжатой версии новости с GPT-4o
 async def improve_summary_with_gpt(title, full_article, link):
     prompt = (
-        f"Reescribe esta noticia de forma clara, completa y compacta para una publicación en un canal de Telegram. "
-        f"Limita el texto a 2 párrafos y 800 caracteres. Resume solo lo esencial. "
-        f"Evita repeticiones, no incluyas encabezados y no repitas el título. "
-        f"Incorpora el siguiente enlace en una palabra clave dentro del texto: {link}\n\n"
-        f"Título: {title}\n\nTexto de la noticia:\n{full_article[:3000]}"
+        f"Resume esta noticia de forma muy breve y clara para una publicación en Telegram. "
+        f"Limita el texto a máximo 400 caracteres. Da solo lo esencial en 1 o 2 frases. "
+        f"Incorpora el siguiente enlace en una palabra clave dentro del texto: {link}.\n\n"
+        f"Título: {title}\n\nTexto de la noticia:\n{full_article[:2000]}"
     )
+
     try:
         response = await openai.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.6,
-            max_tokens=400
+            max_tokens=300
         )
         return response.choices[0].message.content.strip()[:1000]
     except Exception as e:
         print("GPT error:", e)
-        return full_article[:800]
+        return full_article[:400]
 
-# Основной цикл обработки
 async def fetch_and_publish():
     for url in RSS_FEEDS:
         feed = feedparser.parse(url)
@@ -116,7 +110,7 @@ async def fetch_and_publish():
             if title in published_titles:
                 continue
 
-            # Поиск изображения с логированием источника
+            # Поиск изображения
             image_url = ""
             if "media_content" in entry:
                 image_url = entry.media_content[0]["url"]
@@ -157,7 +151,6 @@ async def fetch_and_publish():
             except Exception as e:
                 print("❌ Telegram error:", e)
 
-# Цикл публикации
 async def main_loop():
     while True:
         print("🔄 Comprobando noticias...")
