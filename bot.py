@@ -46,7 +46,6 @@ def detect_emoji(text):
     elif any(word in text for word in ["lluvia", "tormenta", "clima", "temperatura", "calor"]):
         icon = "🌧️"
 
-    # страны — только если явно найдены
     countries = {
         "francia": "🇫🇷",
         "alemania": "🇩🇪",
@@ -111,7 +110,6 @@ async def fetch_and_publish():
             if title in published_titles:
                 continue
 
-            # Поиск изображения
             image_url = ""
             if "media_content" in entry:
                 image_url = entry.media_content[0]["url"]
@@ -124,14 +122,11 @@ async def fetch_and_publish():
                 if match:
                     image_url = match.group(1)
 
-            print(f"📰 Fuente: {url}")
-            print(f"🔗 Imagen: {image_url or 'No encontrada'}")
-
-            emoji = detect_emoji(title + summary)
             full_article = get_full_article(link)
             if not full_article:
                 full_article = summary
 
+            emoji = detect_emoji(title + summary + full_article)
             improved_text = await improve_summary_with_gpt(title, full_article, link)
             hashtags = "#Noticias #España #Actualidad"
 
