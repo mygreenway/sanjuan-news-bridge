@@ -33,7 +33,7 @@ published_titles = set()
 def detect_emoji(text):
     text = text.lower()
     icon = "📰"
-    flag = "🇪🇸"  # по умолчанию
+    flag = "🇪🇸"
 
     if any(word in text for word in ["electricidad", "energía", "apagón", "eléctrico"]):
         icon = "⚡"
@@ -47,25 +47,25 @@ def detect_emoji(text):
         icon = "🌧️"
 
     countries = {
-        "francia": "🇫🇷",
-        "alemania": "🇩🇪",
-        "italia": "🇮🇹",
-        "reino unido": "🇬🇧",
-        "gran bretaña": "🇬🇧",
-        "eeuu": "🇺🇸",
-        "estados unidos": "🇺🇸",
-        "usa": "🇺🇸",
-        "rusia": "🇷🇺",
-        "ucrania": "🇺🇦",
-        "marruecos": "🇲🇦",
-        "china": "🇨🇳",
-        "argentina": "🇦🇷",
-        "méxico": "🇲🇽",
-        "mexico": "🇲🇽"
+        r"\bespaña\b": "🇪🇸",
+        r"\bfrancia\b": "🇫🇷",
+        r"\balemania\b": "🇩🇪",
+        r"\bitalia\b": "🇮🇹",
+        r"\breino unido\b": "🇬🇧",
+        r"\bgran bretaña\b": "🇬🇧",
+        r"\bestados unidos\b": "🇺🇸",
+        r"\busa\b": "🇺🇸",
+        r"\beeuu\b": "🇺🇸",
+        r"\brusia\b": "🇷🇺",
+        r"\bucrania\b": "🇺🇦",
+        r"\bmarruecos\b": "🇲🇦",
+        r"\bchina\b": "🇨🇳",
+        r"\bargentina\b": "🇦🇷",
+        r"\bm[ée]xico\b": "🇲🇽"
     }
 
-    for keyword, emoji_flag in countries.items():
-        if keyword in text:
+    for pattern, emoji_flag in countries.items():
+        if re.search(pattern, text):
             flag = emoji_flag
             break
 
