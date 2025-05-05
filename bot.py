@@ -107,9 +107,13 @@ async def fetch_and_publish():
             link = entry.get("link", "")
             summary = entry.get("summary", "")
 
-            if title in published_titles:
+            # Убираем дубликаты по смыслу (очищенный заголовок)
+            title_key = re.sub(r'[^\w\s]', '', title.lower()).strip()
+            if title_key in published_titles:
                 continue
+            published_titles.add(title_key)
 
+            # Поиск изображения
             image_url = ""
             if "media_content" in entry:
                 image_url = entry.media_content[0]["url"]
@@ -142,7 +146,6 @@ async def fetch_and_publish():
                 else:
                     await bot.send_message(chat_id=CHANNEL_ID, text=text, parse_mode=ParseMode.HTML)
 
-                published_titles.add(title)
                 await asyncio.sleep(5)
             except Exception as e:
                 print("❌ Telegram error:", e)
