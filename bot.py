@@ -8,8 +8,8 @@ from openai import AsyncOpenAI
 import trafilatura
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+CHANNEL_ID = "@sanjuan_online"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-CHANNEL_IDS = ["@sanjuan_online", "@NoticiasEspanaHoy"]
 
 bot = Bot(token=BOT_TOKEN)
 openai = AsyncOpenAI(api_key=OPENAI_API_KEY)
@@ -33,7 +33,7 @@ published_titles = set()
 def detect_emoji(text):
     text = text.lower()
     icon = "📰"
-    flag = "🇪🇸"
+    flag = "🇪🇸"  # по умолчанию
 
     if any(word in text for word in ["electricidad", "energía", "apagón", "eléctrico"]):
         icon = "⚡"
@@ -46,30 +46,29 @@ def detect_emoji(text):
     elif any(word in text for word in ["lluvia", "tormenta", "clima", "temperatura", "calor"]):
         icon = "🌧️"
 
-    if "españa" in text:
-        flag = "🇪🇸"
-    elif "francia" in text:
-        flag = "🇫🇷"
-    elif "alemania" in text:
-        flag = "🇩🇪"
-    elif "italia" in text:
-        flag = "🇮🇹"
-    elif "reino unido" in text or "gran bretaña" in text:
-        flag = "🇬🇧"
-    elif "eeuu" in text or "estados unidos" in text or "usa" in text:
-        flag = "🇺🇸"
-    elif "rusia" in text:
-        flag = "🇷🇺"
-    elif "ucrania" in text:
-        flag = "🇺🇦"
-    elif "marruecos" in text:
-        flag = "🇲🇦"
-    elif "china" in text:
-        flag = "🇨🇳"
-    elif "argentina" in text:
-        flag = "🇦🇷"
-    elif "méxico" in text or "mexico" in text:
-        flag = "🇲🇽"
+    # страны — только если явно найдены
+    countries = {
+        "francia": "🇫🇷",
+        "alemania": "🇩🇪",
+        "italia": "🇮🇹",
+        "reino unido": "🇬🇧",
+        "gran bretaña": "🇬🇧",
+        "eeuu": "🇺🇸",
+        "estados unidos": "🇺🇸",
+        "usa": "🇺🇸",
+        "rusia": "🇷🇺",
+        "ucrania": "🇺🇦",
+        "marruecos": "🇲🇦",
+        "china": "🇨🇳",
+        "argentina": "🇦🇷",
+        "méxico": "🇲🇽",
+        "mexico": "🇲🇽"
+    }
+
+    for keyword, emoji_flag in countries.items():
+        if keyword in text:
+            flag = emoji_flag
+            break
 
     return f"{icon} {flag}"
 
@@ -112,6 +111,7 @@ async def fetch_and_publish():
             if title in published_titles:
                 continue
 
+            # Поиск изображения
             image_url = ""
             if "media_content" in entry:
                 image_url = entry.media_content[0]["url"]
@@ -133,7 +133,7 @@ async def fetch_and_publish():
                 full_article = summary
 
             improved_text = await improve_summary_with_gpt(title, full_article, link)
-            hashtags = "#Noticias #España #SanJuan"
+            hashtags = "#Noticias #España #Actualidad"
 
             text = (
                 f"<b>{emoji} {title}</b>\n\n"
@@ -142,11 +142,10 @@ async def fetch_and_publish():
             )
 
             try:
-                for chat_id in CHANNEL_IDS:
-                    if image_url:
-                        await bot.send_photo(chat_id=chat_id, photo=image_url, caption=text, parse_mode=ParseMode.HTML)
-                    else:
-                        await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML)
+                if image_url:
+                    await bot.send_photo(chat_id=CHANNEL_ID, photo=image_url, caption=text, parse_mode=ParseMode.HTML)
+                else:
+                    await bot.send_message(chat_id=CHANNEL_ID, text=text, parse_mode=ParseMode.HTML)
 
                 published_titles.add(title)
                 await asyncio.sleep(5)
