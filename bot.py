@@ -103,11 +103,15 @@ async def fetch_and_publish():
     for url in RSS_FEEDS:
         feed = feedparser.parse(url)
         for entry in feed.entries[:1]:
-            title = entry.get("title", "")
+            raw_title = entry.get("title", "")
             link = entry.get("link", "")
             summary = entry.get("summary", "")
 
-            # Убираем дубликаты по смыслу (очищенный заголовок)
+            # Очищаем заголовок от "Política |", "Directo:", и т.д.
+            title = re.sub(r'^[^:|]+[|:]\s*', '', raw_title, flags=re.IGNORECASE)
+            title = re.sub(r'\b(directo|última hora|en vivo)\b[:\-–—]?\s*', '', title, flags=re.IGNORECASE)
+
+            # Удаляем повторы по "очищенному" заголовку
             title_key = re.sub(r'[^\w\s]', '', title.lower()).strip()
             if title_key in published_titles:
                 continue
