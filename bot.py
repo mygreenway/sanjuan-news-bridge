@@ -32,9 +32,6 @@ RSS_FEEDS = [
 published_titles = set()
 recent_summaries = []
 
-def is_similar(a, b, threshold=0.85):
-    return SequenceMatcher(None, a, b).ratio() >= threshold
-
 def detect_emoji(text):
     text = text.lower()
     icon = "📰"
@@ -101,8 +98,30 @@ async def improve_summary_with_gpt(title, full_article, link):
         )
         return response.choices[0].message.content.strip()[:1000]
     except Exception as e:
-        print("GPT error:", e)
+        print("GPT error (resumen):", e)
         return full_article[:400]
+
+async def is_new_meaningful(improved_text, recent_summaries):
+    joined = "\n".join(f"- {s}" for s in recent_summaries)
+    prompt = (
+        f"Estás ayudando a un bot de noticias en Telegram a evitar repetir el mismo contenido.\n\n"
+        f"Últimos resúmenes publicados:\n{joined}\n\n"
+        f"Nuevo resumen candidato:\n{improved_text}\n\n"
+        f"¿Este nuevo resumen expresa una noticia realmente distinta? Si sí, responde solo con: nueva. "
+        f"Si repite la misma noticia con otras palabras, responde solo con: repetida."
+    )
+    try:
+        response = await openai.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=10
+        )
+        answer = response.choices[0].message.content.strip().lower()
+        return answer == "nueva"
+    except Exception as e:
+        print("GPT error (comparación):", e)
+        return True  # по умолчанию публикуем, если ошибка
 
 async def fetch_and_publish():
     for url in RSS_FEEDS:
@@ -112,7 +131,6 @@ async def fetch_and_publish():
             link = entry.get("link", "")
             summary = entry.get("summary", "")
 
-            # Очистка заголовка
             title = re.sub(r'^[^:|]+[|:]\s*', '', raw_title, flags=re.IGNORECASE)
             title = re.sub(r'\b(directo|última hora|en vivo)\b[:\-–—]?\s*', '', title, flags=re.IGNORECASE)
 
@@ -140,12 +158,13 @@ async def fetch_and_publish():
             emoji = detect_emoji(title + summary + full_article)
             improved_text = await improve_summary_with_gpt(title, full_article, link)
 
-            # Умная проверка на дубли по смыслу
-            if any(is_similar(improved_text.lower(), s) for s in recent_summaries):
-                print("⏩ Noticia duplicada por similitud. Se omite.")
+            # Смысловая проверка через GPT
+            is_new = await is_new_meaningful(improved_text, recent_summaries)
+            if not is_new:
+                print("⏩ Noticia repetida por sentido. Se omite.")
                 continue
 
-            recent_summaries.append(improved_text.lower())
+            recent_summaries.append(improved_text)
             if len(recent_summaries) > 10:
                 recent_summaries.pop(0)
 
