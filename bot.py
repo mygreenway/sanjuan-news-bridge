@@ -29,6 +29,7 @@ RSS_FEEDS = [
 ]
 
 published_titles = set()
+recent_summaries = []
 
 def detect_emoji(text):
     text = text.lower()
@@ -107,11 +108,11 @@ async def fetch_and_publish():
             link = entry.get("link", "")
             summary = entry.get("summary", "")
 
-            # Очищаем заголовок от "Política |", "Directo:", и т.д.
+            # Очистка заголовка от "Política |", "Directo:", и т.п.
             title = re.sub(r'^[^:|]+[|:]\s*', '', raw_title, flags=re.IGNORECASE)
             title = re.sub(r'\b(directo|última hora|en vivo)\b[:\-–—]?\s*', '', title, flags=re.IGNORECASE)
 
-            # Удаляем повторы по "очищенному" заголовку
+            # Фильтрация по ключу заголовка
             title_key = re.sub(r'[^\w\s]', '', title.lower()).strip()
             if title_key in published_titles:
                 continue
@@ -136,6 +137,16 @@ async def fetch_and_publish():
 
             emoji = detect_emoji(title + summary + full_article)
             improved_text = await improve_summary_with_gpt(title, full_article, link)
+
+            # Проверка на повтор по смыслу
+            if any(improved_text.lower() in s or s in improved_text.lower() for s in recent_summaries):
+                print("⏩ Noticia duplicada por contenido. Se omite.")
+                continue
+
+            recent_summaries.append(improved_text.lower())
+            if len(recent_summaries) > 10:
+                recent_summaries.pop(0)
+
             hashtags = "#Noticias #España #Actualidad"
 
             text = (
