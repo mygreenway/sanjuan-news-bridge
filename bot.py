@@ -8,8 +8,8 @@ from openai import AsyncOpenAI
 import trafilatura
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-CHANNEL_ID = "@sanjuan_online"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+CHANNEL_IDS = ["@sanjuan_online", "@NoticiasEspanaHoy"]
 
 bot = Bot(token=BOT_TOKEN)
 openai = AsyncOpenAI(api_key=OPENAI_API_KEY)
@@ -108,17 +108,15 @@ async def fetch_and_publish():
             link = entry.get("link", "")
             summary = entry.get("summary", "")
 
-            # Очистка заголовка от "Política |", "Directo:", и т.п.
+            # Очистка заголовка от лишнего
             title = re.sub(r'^[^:|]+[|:]\s*', '', raw_title, flags=re.IGNORECASE)
             title = re.sub(r'\b(directo|última hora|en vivo)\b[:\-–—]?\s*', '', title, flags=re.IGNORECASE)
 
-            # Фильтрация по ключу заголовка
             title_key = re.sub(r'[^\w\s]', '', title.lower()).strip()
             if title_key in published_titles:
                 continue
             published_titles.add(title_key)
 
-            # Поиск изображения
             image_url = ""
             if "media_content" in entry:
                 image_url = entry.media_content[0]["url"]
@@ -138,7 +136,6 @@ async def fetch_and_publish():
             emoji = detect_emoji(title + summary + full_article)
             improved_text = await improve_summary_with_gpt(title, full_article, link)
 
-            # Проверка на повтор по смыслу
             if any(improved_text.lower() in s or s in improved_text.lower() for s in recent_summaries):
                 print("⏩ Noticia duplicada por contenido. Se omite.")
                 continue
@@ -156,14 +153,14 @@ async def fetch_and_publish():
             )
 
             try:
-                if image_url:
-                    await bot.send_photo(chat_id=CHANNEL_ID, photo=image_url, caption=text, parse_mode=ParseMode.HTML)
-                else:
-                    await bot.send_message(chat_id=CHANNEL_ID, text=text, parse_mode=ParseMode.HTML)
-
+                for channel in CHANNEL_IDS:
+                    if image_url:
+                        await bot.send_photo(chat_id=channel, photo=image_url, caption=text, parse_mode=ParseMode.HTML)
+                    else:
+                        await bot.send_message(chat_id=channel, text=text, parse_mode=ParseMode.HTML)
                 await asyncio.sleep(5)
             except Exception as e:
-                print("❌ Telegram error:", e)
+                print(f"❌ Telegram error en {channel}:", e)
 
 async def main_loop():
     while True:
