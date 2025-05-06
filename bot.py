@@ -2,6 +2,7 @@ import os
 import re
 import asyncio
 import feedparser
+from difflib import SequenceMatcher
 from telegram import Bot
 from telegram.constants import ParseMode
 from openai import AsyncOpenAI
@@ -30,6 +31,9 @@ RSS_FEEDS = [
 
 published_titles = set()
 recent_summaries = []
+
+def is_similar(a, b, threshold=0.85):
+    return SequenceMatcher(None, a, b).ratio() >= threshold
 
 def detect_emoji(text):
     text = text.lower()
@@ -108,7 +112,7 @@ async def fetch_and_publish():
             link = entry.get("link", "")
             summary = entry.get("summary", "")
 
-            # Очистка заголовка от лишнего
+            # Очистка заголовка
             title = re.sub(r'^[^:|]+[|:]\s*', '', raw_title, flags=re.IGNORECASE)
             title = re.sub(r'\b(directo|última hora|en vivo)\b[:\-–—]?\s*', '', title, flags=re.IGNORECASE)
 
@@ -136,8 +140,9 @@ async def fetch_and_publish():
             emoji = detect_emoji(title + summary + full_article)
             improved_text = await improve_summary_with_gpt(title, full_article, link)
 
-            if any(improved_text.lower() in s or s in improved_text.lower() for s in recent_summaries):
-                print("⏩ Noticia duplicada por contenido. Se omite.")
+            # Умная проверка на дубли по смыслу
+            if any(is_similar(improved_text.lower(), s) for s in recent_summaries):
+                print("⏩ Noticia duplicada por similitud. Se omite.")
                 continue
 
             recent_summaries.append(improved_text.lower())
@@ -145,7 +150,6 @@ async def fetch_and_publish():
                 recent_summaries.pop(0)
 
             hashtags = "#Noticias #España #Actualidad"
-
             text = (
                 f"<b>{emoji} {title}</b>\n\n"
                 f"{improved_text}\n\n"
