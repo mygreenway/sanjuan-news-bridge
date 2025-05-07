@@ -39,12 +39,10 @@ def get_full_article(url):
 
 async def improve_summary_with_gpt(title, full_article, link):
     prompt = (
-        f"Resume esta noticia de forma muy breve y clara para una publicación en Telegram. "
-        f"Usa como máximo 400 caracteres y escribe 1 o 2 frases con la información esencial. "
-        f"Antes del texto, añade un emoji temático (como ⚡, 🚨, 🏛️, etc.) y un único emoji de bandera del país relevante "
-        f"(🇪🇸, 🇺🇸, 🇫🇷, 🇻🇦, 🇲🇽, etc.). "
-        f"Incorpora el siguiente enlace en una palabra clave usando el formato HTML así: <a href=\"{link}\">palabra</a>. "
-        f"Al final del resumen, añade 2 o 3 hashtags relevantes y populares (sin duplicar anteriores).\n\n"
+        f"Escribe una publicación para Telegram sobre la siguiente noticia. Sigue este formato exacto:\n\n"
+        f"1. En la primera línea, escribe el título precedido por un emoji temático y la bandera del país. Usa formato HTML así: <b>⚡ 🇪🇸 Título</b>\n"
+        f"2. En un párrafo aparte, resume la noticia en 1 o 2 frases (máx. 400 caracteres). Usa <a href=\"{link}\">palabra</a> para enlazar.\n"
+        f"3. En la última línea separada, añade de 2 a 3 hashtags relevantes y populares.\n\n"
         f"Título: {title}\n\nTexto de la noticia:\n{full_article[:2000]}"
     )
 
@@ -125,14 +123,12 @@ async def fetch_and_publish():
             if len(recent_summaries) > 10:
                 recent_summaries.pop(0)
 
-            text = improved_text
-
             try:
                 for channel in CHANNEL_IDS:
                     if image_url:
-                        await bot.send_photo(chat_id=channel, photo=image_url, caption=text, parse_mode=ParseMode.HTML)
+                        await bot.send_photo(chat_id=channel, photo=image_url, caption=improved_text, parse_mode=ParseMode.HTML)
                     else:
-                        await bot.send_message(chat_id=channel, text=text, parse_mode=ParseMode.HTML)
+                        await bot.send_message(chat_id=channel, text=improved_text, parse_mode=ParseMode.HTML)
                 await asyncio.sleep(5)
             except Exception as e:
                 print(f"❌ Telegram error en {channel}:", e)
