@@ -2,7 +2,6 @@ import os
 import re
 import asyncio
 import feedparser
-from difflib import SequenceMatcher
 from telegram import Bot
 from telegram.constants import ParseMode
 from openai import AsyncOpenAI
@@ -48,28 +47,24 @@ def detect_emoji(text):
     elif any(word in text for word in ["lluvia", "tormenta", "clima", "temperatura", "calor"]):
         icon = "🌧️"
 
-    countries = {
-        r"\bespaña\b": "🇪🇸",
-        r"\bfrancia\b": "🇫🇷",
-        r"\balemania\b": "🇩🇪",
-        r"\bitalia\b": "🇮🇹",
-        r"\breino unido\b": "🇬🇧",
-        r"\bgran bretaña\b": "🇬🇧",
-        r"\bestados unidos\b": "🇺🇸",
-        r"\busa\b": "🇺🇸",
-        r"\beeuu\b": "🇺🇸",
-        r"\brusia\b": "🇷🇺",
-        r"\bucrania\b": "🇺🇦",
-        r"\bmarruecos\b": "🇲🇦",
-        r"\bchina\b": "🇨🇳",
-        r"\bargentina\b": "🇦🇷",
-        r"\bm[ée]xico\b": "🇲🇽"
-    }
+    españa_keywords = [
+        "españa", "andalucía", "aragón", "asturias", "illes balears", "islas baleares", "canarias", "cantabria",
+        "castilla-la mancha", "castilla y león", "cataluña", "catalunya", "ceuta", "comunidad valenciana",
+        "valenciana", "extremadura", "galicia", "la rioja", "madrid", "melilla", "murcia", "navarra",
+        "país vasco", "euskadi", "sevilla", "málaga", "granada", "cádiz", "córdoba", "almería", "huelva", "jaén",
+        "zaragoza", "huesca", "teruel", "oviedo", "gijón", "palma", "mallorca", "ibiza", "menorca",
+        "santa cruz de tenerife", "las palmas", "tenerife", "gran canaria", "lanzarote", "fuerteventura",
+        "santander", "toledo", "albacete", "cuenca", "guadalajara", "ciudad real", "valladolid", "burgos",
+        "león", "salamanca", "ávila", "palencia", "soria", "segovia", "zamora", "barcelona", "tarragona",
+        "lleida", "girona", "valencia", "alicante", "castellón", "mérida", "badajoz", "cáceres", "a coruña",
+        "santiago de compostela", "lugo", "ourense", "pontevedra", "vigo", "ferrol", "logroño", "murcia",
+        "cartagena", "pamplona", "bilbao", "vitoria", "san sebastián", "donostia", "guadiana", "ebro", "tajo",
+        "duero", "segura", "pirineos", "sierra nevada", "estrecho de gibraltar", "mediterráneo", "atlántico",
+        "península ibérica", "mar cantábrico", "mar de alborán"
+    ]
 
-    for pattern, emoji_flag in countries.items():
-        if re.search(pattern, text):
-            flag = emoji_flag
-            break
+    if any(word in text for word in españa_keywords):
+        flag = "🇪🇸"
 
     return f"{icon} {flag}"
 
@@ -121,7 +116,7 @@ async def is_new_meaningful(improved_text, recent_summaries):
         return answer == "nueva"
     except Exception as e:
         print("GPT error (comparación):", e)
-        return True  # по умолчанию публикуем, если ошибка
+        return True
 
 async def fetch_and_publish():
     for url in RSS_FEEDS:
@@ -158,7 +153,6 @@ async def fetch_and_publish():
             emoji = detect_emoji(title + summary + full_article)
             improved_text = await improve_summary_with_gpt(title, full_article, link)
 
-            # Смысловая проверка через GPT
             is_new = await is_new_meaningful(improved_text, recent_summaries)
             if not is_new:
                 print("⏩ Noticia repetida por sentido. Se omite.")
