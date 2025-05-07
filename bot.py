@@ -31,43 +31,6 @@ RSS_FEEDS = [
 published_titles = set()
 recent_summaries = []
 
-def detect_emoji(text):
-    text = text.lower()
-    icon = "📰"
-    flag = "🇪🇸"
-
-    if any(word in text for word in ["electricidad", "energía", "apagón", "eléctrico"]):
-        icon = "⚡"
-    elif any(word in text for word in ["política", "gobierno", "elecciones", "parlamento"]):
-        icon = "🏛️"
-    elif any(word in text for word in ["economía", "empleo", "precios", "inflación"]):
-        icon = "💰"
-    elif any(word in text for word in ["accidente", "incendio", "policía", "muerte", "suceso"]):
-        icon = "🚨"
-    elif any(word in text for word in ["lluvia", "tormenta", "clima", "temperatura", "calor"]):
-        icon = "🌧️"
-
-    españa_keywords = [
-        "españa", "andalucía", "aragón", "asturias", "illes balears", "islas baleares", "canarias", "cantabria",
-        "castilla-la mancha", "castilla y león", "cataluña", "catalunya", "ceuta", "comunidad valenciana",
-        "valenciana", "extremadura", "galicia", "la rioja", "madrid", "melilla", "murcia", "navarra",
-        "país vasco", "euskadi", "sevilla", "málaga", "granada", "cádiz", "córdoba", "almería", "huelva", "jaén",
-        "zaragoza", "huesca", "teruel", "oviedo", "gijón", "palma", "mallorca", "ibiza", "menorca",
-        "santa cruz de tenerife", "las palmas", "tenerife", "gran canaria", "lanzarote", "fuerteventura",
-        "santander", "toledo", "albacete", "cuenca", "guadalajara", "ciudad real", "valladolid", "burgos",
-        "león", "salamanca", "ávila", "palencia", "soria", "segovia", "zamora", "barcelona", "tarragona",
-        "lleida", "girona", "valencia", "alicante", "castellón", "mérida", "badajoz", "cáceres", "a coruña",
-        "santiago de compostela", "lugo", "ourense", "pontevedra", "vigo", "ferrol", "logroño", "murcia",
-        "cartagena", "pamplona", "bilbao", "vitoria", "san sebastián", "donostia", "guadiana", "ebro", "tajo",
-        "duero", "segura", "pirineos", "sierra nevada", "estrecho de gibraltar", "mediterráneo", "atlántico",
-        "península ibérica", "mar cantábrico", "mar de alborán"
-    ]
-
-    if any(word in text for word in españa_keywords):
-        flag = "🇪🇸"
-
-    return f"{icon} {flag}"
-
 def get_full_article(url):
     downloaded = trafilatura.fetch_url(url)
     if downloaded:
@@ -78,9 +41,10 @@ async def improve_summary_with_gpt(title, full_article, link):
     prompt = (
         f"Resume esta noticia de forma muy breve y clara para una publicación en Telegram. "
         f"Usa como máximo 400 caracteres y escribe 1 o 2 frases con la información esencial. "
-        f"No uses encabezados, no repitas el título. "
-        f"Incorpora el siguiente enlace en una palabra clave usando el formato HTML así: "
-        f'<a href=\"{link}\">palabra</a>.\n\n'
+        f"Antes del texto, añade un emoji temático (como ⚡, 🚨, 🏛️, etc.) y un único emoji de bandera del país relevante "
+        f"(🇪🇸, 🇺🇸, 🇫🇷, 🇻🇦, 🇲🇽, etc.). "
+        f"Incorpora el siguiente enlace en una palabra clave usando el formato HTML así: <a href=\"{link}\">palabra</a>. "
+        f"Al final del resumen, añade 2 o 3 hashtags relevantes y populares (sin duplicar anteriores).\n\n"
         f"Título: {title}\n\nTexto de la noticia:\n{full_article[:2000]}"
     )
 
@@ -89,7 +53,7 @@ async def improve_summary_with_gpt(title, full_article, link):
             model="gpt-4o",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.6,
-            max_tokens=300
+            max_tokens=400
         )
         return response.choices[0].message.content.strip()[:1000]
     except Exception as e:
@@ -150,7 +114,6 @@ async def fetch_and_publish():
             if not full_article:
                 full_article = summary
 
-            emoji = detect_emoji(title + summary + full_article)
             improved_text = await improve_summary_with_gpt(title, full_article, link)
 
             is_new = await is_new_meaningful(improved_text, recent_summaries)
@@ -162,12 +125,7 @@ async def fetch_and_publish():
             if len(recent_summaries) > 10:
                 recent_summaries.pop(0)
 
-            hashtags = "#Noticias #España #Actualidad"
-            text = (
-                f"<b>{emoji} {title}</b>\n\n"
-                f"{improved_text}\n\n"
-                f"{hashtags}"
-            )
+            text = improved_text
 
             try:
                 for channel in CHANNEL_IDS:
