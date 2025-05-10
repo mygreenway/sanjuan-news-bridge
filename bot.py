@@ -61,6 +61,21 @@ async def improve_summary_with_gpt(title, full_article, link):
             )
             content = response.choices[0].message.content.strip()
             content = re.sub(r'```html|```|Título:', '', content).strip()
+
+            # Удаление типичных фраз-призывов к ссылке
+            patterns = [
+                r'para más detalles[^.]*\\.',
+                r'consulta( esta)? noticia( completa)?[^.]*\\.',
+                r'más información[^.]*\\.',
+                r'haz clic[^.]*\\.',
+                r'vea (más|la noticia)[^.]*\\.',
+            ]
+            for pattern in patterns:
+                content = re.sub(pattern, '', content, flags=re.IGNORECASE).strip()
+
+            # Добавление абзаца перед хештегами, если его нет
+            content = re.sub(r'(?<!\n)(\s*#)', r'\n\n\1', content)
+
             return content[:1000]
         except Exception as e:
             logging.error(f"GPT error (resumen): {e}")
