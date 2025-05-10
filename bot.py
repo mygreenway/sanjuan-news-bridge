@@ -44,12 +44,11 @@ def get_full_article(url):
 
 async def improve_summary_with_gpt(title, full_article, link):
     prompt = (
-        f"Crea una publicación profesional para Telegram:\n"
-        f"1. Primera línea: emoji temático y banderas precisas solo de los países directamente involucrados. Formato HTML: <b>⚡ 🇺🇸🇪🇺 Título</b>\n"
-        f"2. Segundo párrafo: resumen completo y autosuficiente de la noticia en máximo 400 caracteres. El lector debe entender claramente la noticia SIN necesidad de abrir el enlace.\n"
-        f"3. Inserta un enlace opcional en un párrafo aparte, con formato HTML discretamente dentro de una palabra clave: <a href=\"{link}\">palabra clave</a>.\n"
-        f"4. Finaliza con 2-3 hashtags populares en español.\n"
-        f"Sé neutral, informativo y profesional.\n\n"
+        f"Crea una publicación profesional para Telegram con este formato:\n"
+        f"1. Primera línea: emoji temático, banderas relevantes y título (sin la palabra 'Título'). Formato HTML: <b>⚡ 🇺🇸🇪🇺 Aquí título claro</b>\n"
+        f"2. Segundo párrafo: resume completamente la noticia (máximo 400 caracteres), el lector debe entender toda la noticia SIN abrir enlaces externos. Inserta naturalmente un enlace HTML (<a href=\"{link}\">palabra clave</a>).\n"
+        f"3. Finaliza con 2-3 hashtags populares en español.\n"
+        f"No agregues frases adicionales. Sé neutral e informativo.\n\n"
         f"Título: {title}\nTexto: {full_article[:1500]}"
     )
     for _ in range(2):
@@ -60,7 +59,9 @@ async def improve_summary_with_gpt(title, full_article, link):
                 temperature=0.3,
                 max_tokens=400
             )
-            return response.choices[0].message.content.strip()[:1000]
+            content = response.choices[0].message.content.strip()
+            content = re.sub(r'```html|```|Título:', '', content).strip()
+            return content[:1000]
         except Exception as e:
             logging.error(f"GPT error (resumen): {e}")
             await asyncio.sleep(3)
