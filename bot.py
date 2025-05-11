@@ -16,7 +16,7 @@ logging.basicConfig(
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-CHANNEL_IDS = ["@sanjuan_online", "@NoticiasEspanaHoy"]
+CHANNEL_IDS = ["@NoticiasEspanaHoy"]
 
 bot = Bot(token=BOT_TOKEN)
 openai = AsyncOpenAI(api_key=OPENAI_API_KEY)
@@ -44,59 +44,43 @@ def get_full_article(url):
 
 async def improve_summary_with_gpt(title, full_article, link):
     prompt = (
-        f"Crea una publicación profesional para Telegram con este formato:\n"
-        f"1. Primera línea: emoji temático, banderas relevantes y título (sin la palabra 'Título'). Formato HTML: <b>⚡ 🇺🇸🇪🇺 Aquí título claro</b>\n"
-        f"2. Segundo párrafo: resume completamente la noticia (máximo 400 caracteres), el lector debe entender toda la noticia SIN abrir enlaces externos. Inserta naturalmente un enlace HTML (<a href=\"{link}\">palabra clave</a>).\n"
-        f"3. Finaliza con 2-3 hashtags populares en español.\n"
-        f"No agregues frases adicionales. Sé neutral e informativo.\n\n"
-        f"Título: {title}\nTexto: {full_article[:1500]}"
+        f"Escribe una publicación para Telegram sobre la siguiente noticia. Sigue este formato exacto:\n\n"
+        f"1. En la primera línea, escribe el título precedido por un emoji temático y la bandera del país. Usa formato HTML así: <b>⚡ 🇪🇸 Título</b>\n"
+        f"2. En un párrafo aparte, resume la noticia en 1 o 2 frases (máx. 400 caracteres). Usa <a href=\"{link}\">palabra</a> para enlazar.\n"
+        f"3. En la última línea separada, añade de 2 a 3 hashtags relevantes y populares.\n\n"
+        f"Título: {title}\n\nTexto de la noticia:\n{full_article[:2000]}"
     )
-    for _ in range(2):
-        try:
-            response = await openai.chat.completions.create(
-                model="gpt-4o",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.3,
-                max_tokens=400
-            )
-            content = response.choices[0].message.content.strip()
-            content = re.sub(r'```html|```|Título:', '', content).strip()
 
-            # Удаление типичных фраз-призывов к ссылке
-            patterns = [
-                r'para más detalles[^.]*\\.',
-                r'consulta( esta)? noticia( completa)?[^.]*\\.',
-                r'más información[^.]*\\.',
-                r'haz clic[^.]*\\.',
-                r'vea (más|la noticia)[^.]*\\.',
-            ]
-            for pattern in patterns:
-                content = re.sub(pattern, '', content, flags=re.IGNORECASE).strip()
-
-            # Добавление абзаца перед хештегами, если его нет
-            content = re.sub(r'(?<!\n)(\s*#)', r'\n\n\1', content)
-
-            return content[:1000]
-        except Exception as e:
-            logging.error(f"GPT error (resumen): {e}")
-            await asyncio.sleep(3)
-    return full_article[:350]
+    try:
+        response = await openai.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.6,
+            max_tokens=400
+        )
+        return response.choices[0].message.content.strip()[:1000]
+    except Exception as e:
+        logging.error(f"GPT error (resumen): {e}")
+        return full_article[:400]
 
 async def is_new_meaningful(improved_text, recent_summaries):
-    joined = "\n".join(recent_summaries)
+    joined = "\n".join(f"- {s}" for s in recent_summaries)
     prompt = (
-        f"Últimas noticias:\n{joined}\n\n"
-        f"Nueva noticia:\n{improved_text}\n\n"
-        f"Si es distinta responde SOLO 'nueva', si no, responde 'repetida'."
+        f"Estás ayudando a un bot de noticias en Telegram a evitar repetir el mismo contenido.\n\n"
+        f"Últimos resúmenes publicados:\n{joined}\n\n"
+        f"Nuevo resumen candidato:\n{improved_text}\n\n"
+        f"¿Este nuevo resumen expresa una noticia realmente distinta? Si sí, responde solo con: nueva. "
+        f"Si repite la misma noticia con otras palabras, responde solo con: repetida."
     )
     try:
         response = await openai.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
-            max_tokens=5
+            max_tokens=10
         )
-        return response.choices[0].message.content.strip().lower() == "nueva"
+        answer = response.choices[0].message.content.strip().lower()
+        return answer == "nueva"
     except Exception as e:
         logging.error(f"GPT error (comparación): {e}")
         return True
@@ -105,45 +89,58 @@ async def fetch_and_publish():
     for url in RSS_FEEDS:
         feed = feedparser.parse(url)
         for entry in feed.entries[:1]:
-            title = re.sub(r'^[^:|]+[|:]\s*', '', entry.get("title", "")).strip()
+            raw_title = entry.get("title", "")
             link = entry.get("link", "")
             summary = entry.get("summary", "")
+
+            title = re.sub(r'^[^:|]+[|:]\s*', '', raw_title, flags=re.IGNORECASE)
+            title = re.sub(r'\b(directo|última hora|en vivo)\b[:\-–—]?\s*', '', title, flags=re.IGNORECASE)
 
             title_key = re.sub(r'[^\w\s]', '', title.lower()).strip()
             if title_key in published_titles:
                 continue
             published_titles.add(title_key)
 
-            image_url = next((entry.get(key)[0]["url"] for key in ["media_content", "media_thumbnail"] if key in entry), "")
-            if not image_url:
-                img_match = re.search(r'<img[^>]+src="([^">]+)"', summary)
-                image_url = img_match.group(1) if img_match else ""
+            image_url = ""
+            if "media_content" in entry:
+                image_url = entry.media_content[0]["url"]
+            elif "image" in entry:
+                image_url = entry.image.get("href", "")
+            elif "media_thumbnail" in entry:
+                image_url = entry.media_thumbnail[0].get("url", "")
+            elif "summary" in entry:
+                match = re.search(r'<img[^>]+src="([^">]+)"', entry.summary)
+                if match:
+                    image_url = match.group(1)
 
-            full_article = get_full_article(link) or summary
+            full_article = get_full_article(link)
+            if not full_article:
+                full_article = summary
+
             improved_text = await improve_summary_with_gpt(title, full_article, link)
 
-            if not await is_new_meaningful(improved_text, recent_summaries):
-                logging.info(f"Noticia repetida: {title}")
+            is_new = await is_new_meaningful(improved_text, recent_summaries)
+            if not is_new:
+                logging.info("⏩ Noticia repetida por sentido. Se omite.")
                 continue
 
             recent_summaries.append(improved_text)
             if len(recent_summaries) > 10:
                 recent_summaries.pop(0)
 
-            for channel in CHANNEL_IDS:
-                try:
+            try:
+                for channel in CHANNEL_IDS:
                     if image_url:
                         await bot.send_photo(chat_id=channel, photo=image_url, caption=improved_text, parse_mode=ParseMode.HTML)
                     else:
                         await bot.send_message(chat_id=channel, text=improved_text, parse_mode=ParseMode.HTML)
-                    logging.info(f"Publicado en {channel}: {title}")
-                    await asyncio.sleep(5)
-                except Exception as e:
-                    logging.error(f"Telegram error {channel}: {e}")
+                await asyncio.sleep(5)
+            except Exception as e:
+                logging.error(f"❌ Telegram error en {channel}: {e}")
 
 async def main_loop():
     while True:
-        logging.info("Buscando nuevas noticias...")
+        logging.info("🔄 Comprobando noticias...")
         await fetch_and_publish()
         await asyncio.sleep(1800)
 
