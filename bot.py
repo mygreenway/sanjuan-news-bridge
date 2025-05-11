@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import asyncio
 import feedparser
 from telegram import Bot
@@ -8,6 +9,7 @@ from openai import AsyncOpenAI
 import trafilatura
 import logging
 
+# Настройка логов
 logging.basicConfig(
     filename='bot_log.log',
     level=logging.INFO,
@@ -35,13 +37,28 @@ RSS_FEEDS = [
     "https://www.lasprovincias.es/rss/2.0/portada/index.rss"
 ]
 
-published_titles = set()
+CACHE_FILE = "titles_cache.json"
 recent_summaries = []
 
+# --- Кеширование заголовков ---
+def load_published_titles():
+    if os.path.exists(CACHE_FILE):
+        with open(CACHE_FILE, "r", encoding="utf-8") as f:
+            return set(json.load(f))
+    return set()
+
+def save_published_titles(titles):
+    with open(CACHE_FILE, "w", encoding="utf-8") as f:
+        json.dump(list(titles), f, ensure_ascii=False, indent=2)
+
+published_titles = load_published_titles()
+
+# --- Получение статьи ---
 def get_full_article(url):
     downloaded = trafilatura.fetch_url(url)
     return trafilatura.extract(downloaded) if downloaded else ""
 
+# --- Улучшение резюме GPT ---
 async def improve_summary_with_gpt(title, full_article, link):
     prompt = (
         f"Escribe una publicación para Telegram sobre la siguiente noticia. Sigue este formato exacto:\n\n"
@@ -63,12 +80,13 @@ async def improve_summary_with_gpt(title, full_article, link):
         logging.error(f"GPT error (resumen): {e}")
         return full_article[:400]
 
-async def is_new_meaningful(improved_text, recent_summaries):
+# --- Проверка на смысловой повтор ---
+async def is_new_meaningful(candidate_summary, recent_summaries):
     joined = "\n".join(f"- {s}" for s in recent_summaries)
     prompt = (
         f"Estás ayudando a un bot de noticias en Telegram a evitar repetir el mismo contenido.\n\n"
         f"Últimos resúmenes publicados:\n{joined}\n\n"
-        f"Nuevo resumen candidato:\n{improved_text}\n\n"
+        f"Nuevo resumen candidato:\n{candidate_summary}\n\n"
         f"¿Este nuevo resumen expresa una noticia realmente distinta? Si sí, responde solo con: nueva. "
         f"Si repite la misma noticia con otras palabras, responde solo con: repetida."
     )
@@ -79,13 +97,14 @@ async def is_new_meaningful(improved_text, recent_summaries):
             temperature=0,
             max_tokens=10
         )
-        answer = response.choices[0].message.content.strip().lower()
-        return answer == "nueva"
+        return response.choices[0].message.content.strip().lower() == "nueva"
     except Exception as e:
         logging.error(f"GPT error (comparación): {e}")
         return True
 
+# --- Основной цикл получения и публикации ---
 async def fetch_and_publish():
+    global published_titles
     for url in RSS_FEEDS:
         feed = feedparser.parse(url)
         for entry in feed.entries[:1]:
@@ -95,11 +114,38 @@ async def fetch_and_publish():
 
             title = re.sub(r'^[^:|]+[|:]\s*', '', raw_title, flags=re.IGNORECASE)
             title = re.sub(r'\b(directo|última hora|en vivo)\b[:\-–—]?\s*', '', title, flags=re.IGNORECASE)
-
             title_key = re.sub(r'[^\w\s]', '', title.lower()).strip()
+
             if title_key in published_titles:
                 continue
-            published_titles.add(title_key)
+
+            full_article = get_full_article(link)
+            if not full_article:
+                full_article = summary
+
+            # Предварительное краткое резюме
+            short_prompt = f"Resume brevemente esta noticia (máx. 400 caracteres):\n\nTítulo: {title}\n\nTexto:\n{full_article[:1500]}"
+            try:
+                short_response = await openai.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[{"role": "user", "content": short_prompt}],
+                    temperature=0.3,
+                    max_tokens=200
+                )
+                draft_summary = short_response.choices[0].message.content.strip()
+            except Exception as e:
+                logging.error(f"GPT error (resumen preliminar): {e}")
+                draft_summary = full_article[:400]
+
+            is_new = await is_new_meaningful(draft_summary, recent_summaries)
+            if not is_new:
+                logging.info("⏩ Noticia repetida por sentido. Se omite.")
+                continue
+
+            improved_text = await improve_summary_with_gpt(title, full_article, link)
+            recent_summaries.append(draft_summary)
+            if len(recent_summaries) > 10:
+                recent_summaries.pop(0)
 
             image_url = ""
             if "media_content" in entry:
@@ -113,31 +159,20 @@ async def fetch_and_publish():
                 if match:
                     image_url = match.group(1)
 
-            full_article = get_full_article(link)
-            if not full_article:
-                full_article = summary
-
-            improved_text = await improve_summary_with_gpt(title, full_article, link)
-
-            is_new = await is_new_meaningful(improved_text, recent_summaries)
-            if not is_new:
-                logging.info("⏩ Noticia repetida por sentido. Se omite.")
-                continue
-
-            recent_summaries.append(improved_text)
-            if len(recent_summaries) > 10:
-                recent_summaries.pop(0)
-
+            # Отправка в канал
             try:
                 for channel in CHANNEL_IDS:
                     if image_url:
                         await bot.send_photo(chat_id=channel, photo=image_url, caption=improved_text, parse_mode=ParseMode.HTML)
                     else:
                         await bot.send_message(chat_id=channel, text=improved_text, parse_mode=ParseMode.HTML)
+                published_titles.add(title_key)
+                save_published_titles(published_titles)
                 await asyncio.sleep(5)
             except Exception as e:
                 logging.error(f"❌ Telegram error en {channel}: {e}")
 
+# --- Бесконечный цикл ---
 async def main_loop():
     while True:
         logging.info("🔄 Comprobando noticias...")
