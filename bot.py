@@ -9,7 +9,7 @@ from openai import AsyncOpenAI
 import trafilatura
 import logging
 
-# Настройка логов
+# Логи
 logging.basicConfig(
     filename='bot_log.log',
     level=logging.INFO,
@@ -40,7 +40,7 @@ RSS_FEEDS = [
 CACHE_FILE = "titles_cache.json"
 recent_summaries = []
 
-# --- Кеширование заголовков ---
+# --- Кеш ---
 def load_published_titles():
     if os.path.exists(CACHE_FILE):
         with open(CACHE_FILE, "r", encoding="utf-8") as f:
@@ -53,21 +53,20 @@ def save_published_titles(titles):
 
 published_titles = load_published_titles()
 
-# --- Получение статьи ---
+# --- Статья ---
 def get_full_article(url):
     downloaded = trafilatura.fetch_url(url)
     return trafilatura.extract(downloaded) if downloaded else ""
 
-# --- Улучшение резюме GPT ---
+# --- Резюме (финальное) ---
 async def improve_summary_with_gpt(title, full_article, link):
     prompt = (
         f"Escribe una publicación para Telegram sobre la siguiente noticia. Sigue este formato exacto:\n\n"
         f"1. En la primera línea, escribe el título precedido por un emoji temático y la bandera del país. Usa formato HTML así: <b>⚡ 🇪🇸 Título</b>\n"
-        f"2. En un párrafo aparte, resume la noticia en 1 o 2 frases (máx. 400 caracteres). Usa <a href=\"{link}\">palabra</a> para enlazar.\n"
+        f"2. En un párrafo aparte, resume la noticia en 1 o 2 frases (máx. 400 caracteres). Inserta el enlace <a href=\"{link}\">en una palabra clave</a>, pero nunca al final del párrafo.\n"
         f"3. En la última línea separada, añade de 2 a 3 hashtags relevantes y populares.\n\n"
         f"Título: {title}\n\nTexto de la noticia:\n{full_article[:2000]}"
     )
-
     try:
         response = await openai.chat.completions.create(
             model="gpt-4o",
@@ -75,12 +74,24 @@ async def improve_summary_with_gpt(title, full_article, link):
             temperature=0.6,
             max_tokens=400
         )
-        return response.choices[0].message.content.strip()[:1000]
+        text = response.choices[0].message.content.strip()[:1000]
+
+        # Автофильтр: перенос ссылки из конца
+        if text.endswith("</a>"):
+            match = re.search(r'<a href="[^"]+">[^<]+</a>', text)
+            if match:
+                link_html = match.group(0)
+                text = text.replace(link_html, '')
+                dot_pos = text.find('.')
+                insert_pos = dot_pos + 1 if dot_pos != -1 else len(text) // 2
+                text = text[:insert_pos] + ' ' + link_html + ' ' + text[insert_pos:]
+
+        return text
     except Exception as e:
         logging.error(f"GPT error (resumen): {e}")
         return full_article[:400]
 
-# --- Проверка на смысловой повтор ---
+# --- Проверка на дубли ---
 async def is_new_meaningful(candidate_summary, recent_summaries):
     joined = "\n".join(f"- {s}" for s in recent_summaries)
     prompt = (
@@ -102,7 +113,7 @@ async def is_new_meaningful(candidate_summary, recent_summaries):
         logging.error(f"GPT error (comparación): {e}")
         return True
 
-# --- Основной цикл получения и публикации ---
+# --- Основной цикл ---
 async def fetch_and_publish():
     global published_titles
     for url in RSS_FEEDS:
@@ -123,7 +134,7 @@ async def fetch_and_publish():
             if not full_article:
                 full_article = summary
 
-            # Предварительное краткое резюме
+            # Предварительное резюме
             short_prompt = f"Resume brevemente esta noticia (máx. 400 caracteres):\n\nTítulo: {title}\n\nTexto:\n{full_article[:1500]}"
             try:
                 short_response = await openai.chat.completions.create(
@@ -159,7 +170,6 @@ async def fetch_and_publish():
                 if match:
                     image_url = match.group(1)
 
-            # Отправка в канал
             try:
                 for channel in CHANNEL_IDS:
                     if image_url:
@@ -172,7 +182,7 @@ async def fetch_and_publish():
             except Exception as e:
                 logging.error(f"❌ Telegram error en {channel}: {e}")
 
-# --- Бесконечный цикл ---
+# --- Цикл ---
 async def main_loop():
     while True:
         logging.info("🔄 Comprobando noticias...")
