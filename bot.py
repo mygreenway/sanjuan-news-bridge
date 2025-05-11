@@ -67,7 +67,7 @@ def get_full_article(url):
 async def improve_summary_with_gpt(title, full_article, link):
     prompt = (
         f"Escribe una publicación para Telegram sobre la siguiente noticia. Sigue exactamente este formato:\n\n"
-        f"1. Una primera línea con un emoji temático y el título en negrita.\n"
+        f"1. Una primera línea con un emoji temático y el título en negrita usando <b> ... </b>.\n"
         f"2. Luego un párrafo separado (máx. 400 caracteres) que resuma la noticia con claridad. No uses frases como 'más información en el enlace' o similares. El texto debe tener valor completo por sí mismo.\n"
         f"3. Dentro del párrafo, inserta el enlace <a href=\"{link}\">en una palabra clave</a> si es posible, nunca al final.\n"
         f"4. Una línea final con 2 o 3 hashtags relevantes.\n\n"
