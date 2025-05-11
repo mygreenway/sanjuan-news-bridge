@@ -99,7 +99,7 @@ async def fetch_and_publish():
 
     for url in RSS_FEEDS:
         feed = feedparser.parse(url)
-        for entry in feed.entries[:3]:
+        for entry in feed.entries[:1]:
             if published_count >= MAX_PUBLICATIONS_PER_CYCLE:
                 return
 
