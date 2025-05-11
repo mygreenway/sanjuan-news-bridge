@@ -9,7 +9,6 @@ from openai import AsyncOpenAI
 import trafilatura
 import logging
 
-# Логи
 logging.basicConfig(
     filename='bot_log.log',
     level=logging.INFO,
@@ -40,7 +39,6 @@ RSS_FEEDS = [
 CACHE_FILE = "titles_cache.json"
 recent_summaries = []
 
-# --- Кеш ---
 def load_published_titles():
     if os.path.exists(CACHE_FILE):
         with open(CACHE_FILE, "r", encoding="utf-8") as f:
@@ -53,20 +51,19 @@ def save_published_titles(titles):
 
 published_titles = load_published_titles()
 
-# --- Статья ---
 def get_full_article(url):
     downloaded = trafilatura.fetch_url(url)
     return trafilatura.extract(downloaded) if downloaded else ""
 
-# --- Резюме (финальное) ---
 async def improve_summary_with_gpt(title, full_article, link):
     prompt = (
         f"Escribe una publicación para Telegram sobre la siguiente noticia. Sigue este formato exacto:\n\n"
-        f"1. En la primera línea, escribe el título precedido por un emoji temático y la bandera del país. Usa formato HTML así: <b>⚡ 🇪🇸 Título</b>\n"
+        f"1. En la primera línea, escribe el título precedido por un emoji temático (pero sin bandera), relacionado con el contenido. Ejemplos: ⚖️ para justicia, 🏥 para salud, ✈️ para viajes, 🚨 para emergencias, etc. Usa formato HTML así: <b>Emoji Título</b>\n"
         f"2. En un párrafo aparte, resume la noticia en 1 o 2 frases (máx. 400 caracteres). Inserta el enlace <a href=\"{link}\">en una palabra clave</a>, pero nunca al final del párrafo.\n"
         f"3. En la última línea separada, añade de 2 a 3 hashtags relevantes y populares.\n\n"
         f"Título: {title}\n\nTexto de la noticia:\n{full_article[:2000]}"
     )
+
     try:
         response = await openai.chat.completions.create(
             model="gpt-4o",
@@ -74,24 +71,39 @@ async def improve_summary_with_gpt(title, full_article, link):
             temperature=0.6,
             max_tokens=400
         )
-        text = response.choices[0].message.content.strip()[:1000]
+        improved_text = response.choices[0].message.content.strip()[:1000]
 
-        # Автофильтр: перенос ссылки из конца
-        if text.endswith("</a>"):
-            match = re.search(r'<a href="[^"]+">[^<]+</a>', text)
+        # Вставить ссылку, если GPT её не добавил
+        if "</a>" not in improved_text:
+            keywords = ["evento", "acuerdo", "medida", "situación", "rezo", "conflicto", "decisión", "liderazgo"]
+            for word in keywords:
+                pattern = r'\b' + word + r'\b'
+                if re.search(pattern, improved_text, re.IGNORECASE):
+                    improved_text = re.sub(
+                        pattern,
+                        f'<a href="{link}">{word}</a>',
+                        improved_text,
+                        count=1,
+                        flags=re.IGNORECASE
+                    )
+                    break
+
+        # Перенести ссылку из конца в середину
+        elif improved_text.endswith("</a>"):
+            match = re.search(r'<a href="[^"]+">[^<]+</a>', improved_text)
             if match:
                 link_html = match.group(0)
-                text = text.replace(link_html, '')
-                dot_pos = text.find('.')
-                insert_pos = dot_pos + 1 if dot_pos != -1 else len(text) // 2
-                text = text[:insert_pos] + ' ' + link_html + ' ' + text[insert_pos:]
+                improved_text = improved_text.replace(link_html, '')
+                dot_pos = improved_text.find('.')
+                insert_pos = dot_pos + 1 if dot_pos != -1 else len(improved_text) // 2
+                improved_text = improved_text[:insert_pos] + ' ' + link_html + ' ' + improved_text[insert_pos:]
 
-        return text
+        return improved_text
+
     except Exception as e:
         logging.error(f"GPT error (resumen): {e}")
         return full_article[:400]
 
-# --- Проверка на дубли ---
 async def is_new_meaningful(candidate_summary, recent_summaries):
     joined = "\n".join(f"- {s}" for s in recent_summaries)
     prompt = (
@@ -113,7 +125,6 @@ async def is_new_meaningful(candidate_summary, recent_summaries):
         logging.error(f"GPT error (comparación): {e}")
         return True
 
-# --- Основной цикл ---
 async def fetch_and_publish():
     global published_titles
     for url in RSS_FEEDS:
@@ -182,7 +193,6 @@ async def fetch_and_publish():
             except Exception as e:
                 logging.error(f"❌ Telegram error en {channel}: {e}")
 
-# --- Цикл ---
 async def main_loop():
     while True:
         logging.info("🔄 Comprobando noticias...")
