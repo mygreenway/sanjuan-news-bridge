@@ -65,13 +65,16 @@ def get_full_article(url):
     return trafilatura.extract(downloaded) if downloaded else ""
 
 async def improve_summary_with_gpt(title, full_article, link):
+    max_length = 2000 if any(word in link.lower() for word in ["opinion", "analis", "editorial", "tribuna"]) else 1500
+    trimmed_article = full_article[:max_length]
+
     prompt = (
-        f"Escribe una publicación para Telegram sobre la siguiente noticia. Sigue exactamente este formato:\n\n"
-        f"1. Una primera línea con un emoji temático y el título en negrita usando <b> ... </b>.\n"
-        f"2. Luego un párrafo separado (máx. 400 caracteres) que resuma la noticia con claridad. No uses frases como 'más información en el enlace' o similares. El texto debe tener valor completo por sí mismo.\n"
-        f"3. Dentro del párrafo, inserta el enlace <a href=\"{link}\">en una palabra clave</a> si es posible, nunca al final.\n"
-        f"4. Una línea final con 2 o 3 hashtags relevantes.\n\n"
-        f"Título: {title}\n\nTexto:\n{full_article[:2000]}"
+        f"Escribe una publicación para Telegram sobre la siguiente noticia. Sigue este formato ESTRICTAMENTE:\n\n"
+        f"1. Una primera línea con un emoji temático y el título en negrita usando <b> ... </b> (NO uses **).\n"
+        f"2. Luego un párrafo (máx. 400 caracteres) que resuma claramente la noticia. No repitas el título.\n"
+        f"3. Dentro del texto, incluye el enlace <a href=\"{link}\">dentro de una palabra clave</a>, NO al final.\n"
+        f"4. Una última línea con 2 o 3 hashtags relevantes, separados por espacios.\n\n"
+        f"Título: {title}\n\nTexto:\n{trimmed_article}"
     )
 
     response = await openai.chat.completions.create(
@@ -110,6 +113,10 @@ async def fetch_and_publish():
                 continue
 
             full_article = get_full_article(entry.link) or entry.summary
+
+            # Пропуск коротких статей
+            if len(full_article.split()) < 80:
+                continue
 
             draft_summary = full_article[:400]
             is_new = await is_new_meaningful(draft_summary, recent_summaries)
