@@ -39,14 +39,7 @@ RSS_FEEDS = [
 
 CACHE_FILE = "titles_cache.json"
 recent_summaries = []
-
 MAX_PUBLICATIONS_PER_CYCLE = 5
-
-async def notify_admin(message):
-    try:
-        await bot.send_message(chat_id=ADMIN_CHAT_ID, text=message)
-    except Exception as e:
-        logging.error(f"Error notifying admin: {e}")
 
 def load_published_titles():
     if os.path.exists(CACHE_FILE):
@@ -64,6 +57,12 @@ def get_full_article(url):
     downloaded = trafilatura.fetch_url(url)
     return trafilatura.extract(downloaded) if downloaded else ""
 
+async def notify_admin(message):
+    try:
+        await bot.send_message(chat_id=ADMIN_CHAT_ID, text=message)
+    except Exception as e:
+        logging.error(f"Error notifying admin: {e}")
+
 async def improve_summary_with_gpt(title, full_article, link):
     max_length = 2000 if any(word in link.lower() for word in ["opinion", "analis", "editorial", "tribuna"]) else 1500
     trimmed_article = full_article[:max_length]
@@ -72,7 +71,7 @@ async def improve_summary_with_gpt(title, full_article, link):
         f"Escribe una publicación para Telegram sobre la siguiente noticia. Sigue este formato ESTRICTAMENTE:\n\n"
         f"1. Una primera línea con un emoji temático y el título en negrita usando <b> ... </b> (NO uses **).\n"
         f"2. Luego un párrafo (máx. 400 caracteres) que resuma claramente la noticia. No repitas el título.\n"
-        f"3. Dentro del texto, incluye el enlace <a href=\"{link}\">dentro de una palabra clave</a>, NO al final.\n"
+        f"3. No añadas ningún enlace. Sólo texto.\n"
         f"4. Una última línea con 2 o 3 hashtags relevantes, separados por espacios.\n\n"
         f"Título: {title}\n\nTexto:\n{trimmed_article}"
     )
@@ -113,8 +112,6 @@ async def fetch_and_publish():
                 continue
 
             full_article = get_full_article(entry.link) or entry.summary
-
-            # Пропуск коротких статей
             if len(full_article.split()) < 80:
                 continue
 
@@ -124,6 +121,23 @@ async def fetch_and_publish():
                 continue
 
             improved_text = await improve_summary_with_gpt(title, full_article, entry.link)
+
+            # Вставка ссылки вручную в 1-2 слово основного текста
+            link_html = f'<a href="{entry.link}">'
+            closing_tag = '</a>'
+            lines = improved_text.split("\n")
+            if len(lines) > 1:
+                words = lines[1].split()
+                if len(words) >= 2:
+                    words[1] = f'{link_html}{words[1]}{closing_tag}'
+                elif words:
+                    words[0] = f'{link_html}{words[0]}{closing_tag}'
+                lines[1] = " ".join(words)
+                improved_text = "\n".join(lines)
+
+            # Добавить подпись с кликабельной ссылкой на канал
+            improved_text += '\n\n<a href="https://t.me/NoticiasEspanaHoy">📡 Noticias de España</a>'
+
             recent_summaries.append(draft_summary)
             recent_summaries[:] = recent_summaries[-10:]
 
