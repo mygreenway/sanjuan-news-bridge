@@ -28,8 +28,9 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 
 CHANNEL_IDS = ["@NoticiasEspanaHoy"]
+CHANNEL_SIGNATURE = '<a href="https://t.me/NoticiasEspanaHoy">📡 Noticias de España</a>'
 
-# Приоритет доменов (чем выше число — тем раньше обрабатываем фид)
+# Приоритет доменов (выше — раньше в обработке)
 DOMAIN_PRIORITY = {
     "elpais.com": 100,
     "rtve.es": 95,
@@ -60,7 +61,7 @@ RSS_FEEDS = [
 
 MAX_PUBLICATIONS_PER_CYCLE = 5
 SLEEP_BETWEEN_POSTS_SEC = 5
-FETCH_EVERY_SEC = 1800  # 30 minutes
+FETCH_EVERY_SEC = 1800  # 30 минут
 
 CACHE_TITLES = "titles_cache.json"
 CACHE_URLS = "urls_cache.json"
@@ -135,7 +136,7 @@ def normalize_url(url: str) -> str:
     return clean.lower()
 
 def safe_html_text(s: str) -> str:
-    # keep only <b>, <i>, <u>, <a href="">
+    # оставляем только <b>, <i>, <u>, <a href="">
     s = s.replace('<b>', '§B§').replace('</b>', '§/B§')
     s = s.replace('<i>', '§I§').replace('</i>', '§/I§')
     s = s.replace('<u>', '§U§').replace('</u>', '§/U§')
@@ -150,7 +151,7 @@ def safe_html_text(s: str) -> str:
     return s
 
 def drop_duplicate_title(title_html: str, body_text: str) -> str:
-    """Remove first sentence if it essentially repeats the title."""
+    """Убираем первое предложение, если оно по сути дублирует заголовок."""
     m = re.search(r'<b>(.*?)</b>', title_html, flags=re.S | re.I)
     title_plain = m.group(1) if m else ""
     def norm(x: str) -> str:
@@ -158,31 +159,31 @@ def drop_duplicate_title(title_html: str, body_text: str) -> str:
     t = norm(title_plain)
     if not t or not body_text:
         return body_text
-    first = body_text.split('. ', 1)[0]
+    # унификация кавычек и точек
+    body = re.sub(r"[“”«»]", '"', body_text)
+    body = re.sub(r"\s+\.\s+", ". ", body)
+    first = body.split('. ', 1)[0]
     if not first:
-        return body_text
+        return body
     f = norm(first)
     t_set, f_set = set(t.split()), set(f.split())
     jacc = len(t_set & f_set) / max(1, len(t_set | f_set))
     if jacc >= 0.6 or t.startswith(f) or f.startswith(t):
-        return body_text[len(first):].lstrip('. ').lstrip()
-    return body_text
+        return body[len(first):].lstrip('. ').lstrip()
+    return body
 
 def normalize_hashtags(s: str, limit: int = 3) -> str:
-    """Возвращает до 3 нормализованных хештегов строчными, уникальными."""
+    """До 3 нормализованных хештегов, строчными, уникальными."""
     if not s:
         return ""
     raw = re.findall(r'#\w+|[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+', s)
-    tags = []
-    seen = set()
+    tags, seen = [], set()
     for tok in raw:
         tag = tok.lower()
         if not tag.startswith('#'):
             tag = '#' + tag
         tag = re.sub(r'[^#\wáéíóúñü]', '', tag)
-        if len(tag) < 2 or len(tag) > 32:
-            continue
-        if tag not in seen:
+        if 2 <= len(tag) <= 32 and tag not in seen:
             seen.add(tag)
             tags.append(tag)
         if len(tags) >= limit:
@@ -207,8 +208,7 @@ def tokenize_core(text: str) -> list:
     text = (text or "").lower()
     text = re.sub(r'https?://\S+', ' ', text)
     text = re.sub(r'[^0-9a-záéíóúñü ]+', ' ', text)
-    toks = [w for w in text.split() if w not in SPANISH_STOP and (len(w) >= 4 or w.isdigit())]
-    return toks
+    return [w for w in text.split() if w not in SPANISH_STOP and (len(w) >= 4 or w.isdigit())]
 
 def simhash64(tokens: list) -> int:
     v = [0] * 64
@@ -261,13 +261,9 @@ def get_full_article(url: str, retries: int = 2) -> str:
         try:
             downloaded = trafilatura.fetch_url(url, no_ssl=True)
             if not downloaded:
-                time.sleep(0.5)
-                continue
+                time.sleep(0.5); continue
             text = trafilatura.extract(
-                downloaded,
-                include_comments=False,
-                include_tables=False,
-                favor_precision=True,
+                downloaded, include_comments=False, include_tables=False, favor_precision=True
             )
             if text and len(text.split()) >= 60:
                 return text
@@ -310,7 +306,7 @@ COUNTRY_FLAG_MAP = {
     "irán":"🇮🇷","iraq":"🇮🇶","siria":"🇸🇾","líbano":"🇱🇧","jordania":"🇯🇴","egipto":"🇪🇬",
     "marruecos":"🇲🇦","argelia":"🇩🇿","túnez":"🇹🇳","sudáfrica":"🇿🇦","nigeria":"🇳🇬","etiopía":"🇪🇹",
     "kenia":"🇰🇪",
-    # Organizaciones
+    # Org.
     "unión europea":"🇪🇺","ue":"🇪🇺"
 }
 
@@ -319,52 +315,14 @@ def extract_countries_from_text(text: str) -> list[str]:
     t = re.sub(r'[^\wáéíóúñü ]+', ' ', t)
     found = []
     for name in COUNTRY_FLAG_MAP.keys():
-        # грубый поиск по словам/фразам
-        pattern = r'\b' + re.escape(name) + r'\b'
-        if re.search(pattern, t):
+        if re.search(r'\b' + re.escape(name) + r'\b', t):
             found.append(name)
-    # уникальные, в порядке появления по длине (длинные фразы приоритетнее)
-    uniq = []
-    seen = set()
+    uniq, seen = [], set()
     for n in sorted(found, key=len, reverse=True):
         if n not in seen:
             seen.add(n)
             uniq.append(n)
-    return list(reversed(uniq))  # более короткие ближе к концу
-
-def choose_emoji_and_tags_by_topic(first_sentence: str, fallback_title: str) -> tuple[str, str, str]:
-    """Возвращает (emoji, topic, topic_tags)"""
-    # Тема из GPT-mini (дёшево и точно)
-    async def detect_topic(text: str) -> str:
-        prompt = (
-            "Analiza la noticia y responde SOLO con una palabra de esta lista: "
-            "politica, economia, deportes, sucesos, ciencia, cultura, clima, internacional, tecnologia, salud.\n"
-            "Elige la que mejor describa el tema principal.\n"
-            "Texto:\n" + (text or fallback_title)
-        )
-        resp = await openai.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-            max_tokens=5
-        )
-        return (resp.choices[0].message.content or "").strip().lower()
-
-    # Поскольку это sync оболочка, вернём корутину наружу
-    return detect_topic(first_sentence or fallback_title)  # type: ignore
-
-def final_emoji_for_topic(topic: str, first_sentence: str) -> str:
-    base = TOPIC_MAP.get(topic, {"emoji": "📰"})["emoji"]
-    if topic == "internacional":
-        countries = extract_countries_from_text(first_sentence)
-        if len(countries) == 1:
-            return COUNTRY_FLAG_MAP.get(countries[0], base)
-    return base
-
-def merge_topic_and_gpt_tags(topic_tags: str, gpt_tags: str, limit: int = 3) -> str:
-    # склейка и нормализация
-    merged = " ".join([topic_tags or "", gpt_tags or ""]).strip()
-    return normalize_hashtags(merged, limit=limit)
+    return list(reversed(uniq))
 
 # --------------------- OPENAI HELPERS -------------------------
 async def openai_chat(messages, model="gpt-4o", temperature=0.6, max_tokens=400, retries=2):
@@ -372,17 +330,19 @@ async def openai_chat(messages, model="gpt-4o", temperature=0.6, max_tokens=400,
     for attempt in range(retries + 1):
         try:
             resp = await openai.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens
+                model=model, messages=messages, temperature=temperature, max_tokens=max_tokens
             )
             return resp
         except Exception as e:
             logging.warning(f"OpenAI error attempt {attempt+1}: {e}")
-            await asyncio.sleep(delay)
-            delay *= 2
+            await asyncio.sleep(delay); delay *= 2
     raise RuntimeError("OpenAI chat failed after retries")
+
+def extract_json_obj(raw: str) -> str | None:
+    # срезаем ```json / ``` и берём первый {...}
+    cleaned = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", raw.strip(), flags=re.S)
+    m = re.search(r"\{.*\}", cleaned, flags=re.S)
+    return m.group(0) if m else None
 
 async def improve_summary_with_gpt(title: str, full_article: str, link: str) -> dict:
     lower_link = (link or "").lower()
@@ -395,7 +355,8 @@ async def improve_summary_with_gpt(title: str, full_article: str, link: str) -> 
         "1) NO repitas el título en el texto: si el primer enunciado coincide con el título, reescríbelo.\n"
         "2) Texto: máx. 400 caracteres, claro y directo.\n"
         "3) No incluyas enlaces en el cuerpo.\n"
-        "4) Devuelve JSON con dos campos: {\"body\": \"...\", \"tags\": \"#tag1 #tag2\"}\n"
+        "4) Devuelve JSON EN TEXTO PLANO, sin bloques de código ni ```.\n"
+        "   Formato: {\"body\": \"...\", \"tags\": \"#tag1 #tag2\"}\n"
         "5) No uses comillas dentro de los valores.\n\n"
         f"Título: {title}\n\nTexto fuente:\n{trimmed_article}"
     )
@@ -406,14 +367,15 @@ async def improve_summary_with_gpt(title: str, full_article: str, link: str) -> 
         temperature=0.6,
         max_tokens=420
     )
-    raw = resp.choices[0].message.content.strip()
-    import json as _json
+    raw = (resp.choices[0].message.content or "").strip()
     try:
-        data = _json.loads(raw)
+        jtxt = extract_json_obj(raw) or raw
+        data = json.loads(jtxt)
         body = str(data.get("body", "")).strip()
         tags = str(data.get("tags", "")).strip()
     except Exception:
-        body = raw[:400]
+        # Fallback: берём сырой текст, режем до 400
+        body = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", raw.strip(), flags=re.S)[:400]
         tags = ""
     return {"body": body, "tags": tags}
 
@@ -434,6 +396,33 @@ async def is_new_meaningful_gpt(candidate_summary: str, recent_summaries: list[s
     ans = (resp.choices[0].message.content or "").strip().lower()
     return ans == "nueva"
 
+async def detect_topic(text: str, fallback_title: str) -> str:
+    prompt = (
+        "Analiza la noticia y responde SOLO con una palabra de esta lista: "
+        "politica, economia, deportes, sucesos, ciencia, cultura, clima, internacional, tecnologia, salud.\n"
+        "Elige la que mejor describa el tema principal.\n"
+        "Texto:\n" + (text or fallback_title)
+    )
+    resp = await openai_chat(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0,
+        max_tokens=5
+    )
+    return (resp.choices[0].message.content or "").strip().lower()
+
+def final_emoji_for_topic(topic: str, first_sentence: str) -> str:
+    base = TOPIC_MAP.get(topic, {"emoji": "📰"})["emoji"]
+    if topic == "internacional":
+        countries = extract_countries_from_text(first_sentence)
+        if len(countries) == 1:
+            return COUNTRY_FLAG_MAP.get(countries[0], base)
+    return base
+
+def merge_topic_and_gpt_tags(topic_tags: str, gpt_tags: str, limit: int = 3) -> str:
+    merged = " ".join([topic_tags or "", gpt_tags or ""]).strip()
+    return normalize_hashtags(merged, limit=limit)
+
 # ------------------------- TELEGRAM ----------------------------
 async def notify_admin(message: str):
     if not ADMIN_CHAT_ID:
@@ -448,15 +437,14 @@ async def send_with_retry(channel: str, image_url: str, text: str):
     for attempt in range(3):
         try:
             if image_url:
-                caption = text[:1024]  # Telegram photo caption limit
+                caption = text[:1024]  # лимит подписи у фото
                 await bot.send_photo(channel, image_url, caption=caption, parse_mode=ParseMode.HTML)
             else:
                 await bot.send_message(channel, text, parse_mode=ParseMode.HTML, disable_web_page_preview=False)
             return
         except Exception as e:
             logging.warning(f"Telegram send attempt {attempt+1} failed: {e}")
-            await asyncio.sleep(delay)
-            delay *= 2
+            await asyncio.sleep(delay); delay *= 2
     raise RuntimeError("Telegram send failed after retries")
 
 # ---------------------- MAIN PIPELINE --------------------------
@@ -526,7 +514,7 @@ async def fetch_and_publish():
                     except Exception as e:
                         logging.warning(f"mini GPT dedupe failed, continue without it: {e}")
 
-            # Текст поста от GPT (без ссылок/эмодзи)
+            # --- Генерируем тело поста (без ссылок/эмодзи)
             try:
                 res = await improve_summary_with_gpt(title, full_article, clean_url)
             except Exception as e:
@@ -539,22 +527,22 @@ async def fetch_and_publish():
             body = drop_duplicate_title(title_html, body)
             gpt_tags_raw = res["tags"]
 
-            # Определяем тему (gpt-4o-mini на 1-ю фразу) и подбираем эмодзи/теги
+            # --- Определение темы и эмодзи/тегов
             first_sentence = (body.split('. ', 1)[0] or title)[:240]
-
-            # detect_topic возвращает корутину -> ждём:
-            topic = await choose_emoji_and_tags_by_topic(first_sentence, title)
-            if not isinstance(topic, str) or topic not in TOPIC_MAP:
+            topic = await detect_topic(first_sentence, title)
+            if topic not in TOPIC_MAP:
                 topic = "internacional" if extract_countries_from_text(first_sentence) else "politica"
 
             emoji = final_emoji_for_topic(topic, first_sentence)
             topic_tags = TOPIC_MAP.get(topic, {"tags": "#noticias"}).get("tags", "#noticias")
             tags = merge_topic_and_gpt_tags(topic_tags, gpt_tags_raw, limit=3)
 
+            # --- Финальная сборка
             leer_mas = f'🔗 <a href="{html.escape(clean_url)}">Leer más</a>'
             parts = [f"{emoji} {title_html}", "", body, "", leer_mas]
             if tags:
-                parts.append(tags)
+                parts.append(tags.lower())
+            parts.append(CHANNEL_SIGNATURE)  # подпись канала внизу всегда
             final_text = "\n".join(p for p in parts if p is not None).strip()
 
             image_url = extract_image(entry)  # если пусто — публикуем текст (без заглушек)
