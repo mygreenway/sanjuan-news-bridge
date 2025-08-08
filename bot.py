@@ -7,6 +7,7 @@ import asyncio
 import logging
 import hashlib
 import urllib.parse
+import difflib
 from collections import deque
 
 import feedparser
@@ -58,9 +59,10 @@ FETCH_EVERY_SEC = 1800  # 30 минут
 CACHE_TITLES = "titles_cache.json"
 CACHE_URLS = "urls_cache.json"
 CACHE_FPS = "fps_cache.json"
+CACHE_EVENT_KEYS = "event_keys.json"  # новый кэш канонических ключей события
 
 EVENT_FPS_MAXLEN = 300
-HAMMING_THRESHOLD_DUP = 6      # чуть мягче, чтобы кластеры лучше ловились
+HAMMING_THRESHOLD_DUP = 6      # мягче, лучше ловит кластеры дублей
 HAMMING_THRESHOLD_MAYBE = 8
 
 # ------------------------- INIT CLIENTS --------------------------
@@ -107,9 +109,26 @@ def save_fps(path: str, dq: deque):
     except Exception as e:
         logging.error(f"FPS cache save error ({path}): {e}")
 
+def load_list(path: str) -> list:
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+def save_list(path: str, data: list, maxlen: int = 400):
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(list(data)[-maxlen:], f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logging.error(f"Cache save error ({path}): {e}")
+
 published_titles = load_set(CACHE_TITLES)
 seen_urls = load_set(CACHE_URLS)
 EVENT_FPS = load_fps(CACHE_FPS, EVENT_FPS_MAXLEN)
+EVENT_KEYS = deque(load_list(CACHE_EVENT_KEYS), maxlen=400)  # <- кэш ключей событий
 
 # ----------------------- TEXT/HTML UTILS ------------------------
 def normalize_title(title: str) -> str:
@@ -128,7 +147,6 @@ def normalize_url(url: str) -> str:
     return clean.lower()
 
 def safe_html_text(s: str) -> str:
-    # оставляем только <b>, <i>, <u>, <a href="">
     s = s.replace('<b>', '§B§').replace('</b>', '§/B§')
     s = s.replace('<i>', '§I§').replace('</i>', '§/I§')
     s = s.replace('<u>', '§U§').replace('</u>', '§/U§')
@@ -143,7 +161,6 @@ def safe_html_text(s: str) -> str:
     return s
 
 def drop_duplicate_title(title_html: str, body_text: str) -> str:
-    """Убираем первое предложение, если оно дублирует заголовок."""
     m = re.search(r'<b>(.*?)</b>', title_html, flags=re.S | re.I)
     title_plain = m.group(1) if m else ""
     def norm(x: str) -> str:
@@ -183,7 +200,6 @@ SPANISH_STOP_MIN = SPANISH_STOP | {
 }
 
 def mask_link_in_body(body_text: str, url: str) -> str:
-    """Спрятать ссылку в 1‑е подходящее «сильное» слово; если не нашли — (detalles) в конце 1‑го предложения."""
     if not body_text or not url:
         return body_text
     plain = re.sub(r'<[^>]+>', '', body_text)
@@ -199,7 +215,6 @@ def mask_link_in_body(body_text: str, url: str) -> str:
         linked = first + f' (<a href="{html.escape(url)}">detalles</a>)'
         return (linked + ('. ' + rest[0] if rest else '')).strip()
 
-    # аккуратно врапим соответствующее слово
     def replacer(match):
         token = match.group(0)
         idx = replacer.i
@@ -210,7 +225,7 @@ def mask_link_in_body(body_text: str, url: str) -> str:
     replacer.i = 0
     return re.sub(r'([^\W_]+)', replacer, body_text, flags=re.UNICODE)
 
-# ---------------------- SIMHASH DEDUP --------------------------
+# ---------------------- SIMHASH + JACCARD ----------------------
 def tokenize_core(text: str) -> list:
     text = (text or "").lower()
     text = re.sub(r'https?://\S+', ' ', text)
@@ -238,7 +253,6 @@ def make_event_fingerprint(title: str, first_para: str) -> int:
         toks = toks[:40]
     return simhash64(toks) if toks else 0
 
-# --------- EXTRA: Jaccard-фильтр по телу поста (супер дешёвый) ----------
 RECENT_BODIES = deque(maxlen=120)
 
 def normalize_tokens_for_jaccard(text: str) -> set[str]:
@@ -259,7 +273,7 @@ def is_jaccard_dup(new_body: str, threshold: float = 0.55) -> bool:
             return True
     return False
 
-# ---------------------- IMAGE EXTRACTION -----------------------
+# ---------------------- ARTICLE FETCH -------------------------
 def extract_image(entry) -> str:
     try:
         mc = entry.get("media_content", [])
@@ -283,7 +297,6 @@ def extract_image(entry) -> str:
             return m.group(1)
     return ""
 
-# ---------------------- ARTICLE FETCH -------------------------
 def get_full_article(url: str, retries: int = 2) -> str:
     for attempt in range(1 + retries):
         try:
@@ -316,12 +329,12 @@ TOPIC_MAP = {
 
 COUNTRY_FLAG_MAP = {
     "españa":"🇪🇸","reino unido":"🇬🇧","uk":"🇬🇧","gran bretaña":"🇬🇧","francia":"🇫🇷","alemania":"🇩🇪",
-    "italia":"🇮🇹","portugal":"🇵🇹","países bajos":"🇳🇱","holanda":"🇳🇱","bélgica":"🇧🇪","suiza":"🇨🇭",
-    "austria":"🇦🇹","suecia":"🇸🇪","noruega":"🇳🇴","dinamarca":"🇩🇰","finlandia":"🇫🇮","irlanda":"🇮🇪",
-    "polonia":"🇵🇱","grecia":"🇬🇷","chequia":"🇨🇿","hungría":"🇭🇺","rumanía":"🇷🇴","bulgaria":"🇧🇬",
-    "serbia":"🇷🇸","croacia":"🇭🇷","eslovenia":"🇸🇮","eslovaquia":"🇸🇰","letonia":"🇱🇻","lituania":"🇱🇹",
-    "estonia":"🇪🇪","ucrania":"🇺🇦","rusia":"🇷🇺","moldavia":"🇲🇩","georgia":"🇬🇪","armenia":"🇦🇲",
-    "albania":"🇦🇱","bosnia":"🇧🇦","macedonia":"🇲🇰","montenegro":"🇲🇪",
+    "italia":"🇮🇹","portugal":"🇵🇹","países bajos":"🇳🇱","holanda":"🇳🇱","бélgica":"🇧🇪".replace("б","b"),
+    "suiza":"🇨🇭","austria":"🇦🇹","suecia":"🇸🇪","noruega":"🇳🇴","dinamarca":"🇩🇰","finlandia":"🇫🇮",
+    "irlanda":"🇮🇪","polonia":"🇵🇱","grecia":"🇬🇷","chequia":"🇨🇿","hungría":"🇭🇺","rumanía":"🇷🇴",
+    "bulgaria":"🇧🇬","serbia":"🇷🇸","croacia":"🇭🇷","eslovenia":"🇸🇮","eslovaquia":"🇸🇰",
+    "letonia":"🇱🇻","lituania":"🇱🇹","estonia":"🇪🇪","ucrania":"🇺🇦","rusia":"🇷🇺","moldavia":"🇲🇩",
+    "georgia":"🇬🇪","armenia":"🇦🇲","albania":"🇦🇱","bosnia":"🇧🇦","macedonia":"🇲🇰","montenegro":"🇲🇪",
     "estados unidos":"🇺🇸","eeuu":"🇺🇸","méxico":"🇲🇽","canadá":"🇨🇦","argentina":"🇦🇷","brasil":"🇧🇷",
     "chile":"🇨🇱","perú":"🇵🇪","colombia":"🇨🇴","uruguay":"🇺🇾","paraguay":"🇵🇾","ecuador":"🇪🇨",
     "bolivia":"🇧🇴","venezuela":"🇻🇪","panamá":"🇵🇦","cuba":"🇨🇺","república dominicana":"🇩🇴",
@@ -454,6 +467,40 @@ def normalize_hashtags(s: str, limit: int = 3) -> str:
 def merge_topic_and_gpt_tags(topic_tags: str, gpt_tags: str, limit: int = 3) -> str:
     return normalize_hashtags(" ".join([topic_tags or "", gpt_tags or ""]).strip(), limit=limit)
 
+# ---------------------- EVENT KEY (жёсткий дедуп) ----------------------
+async def make_event_key(title: str, first_paragraph: str) -> str:
+    base = (title + " " + first_paragraph)[:600]
+    prompt = (
+        "Genera un ID canónico (slug) para esta noticia. Reglas:\n"
+        "- Solo minusculas, a-z, 0-9 y guiones.\n"
+        "- 4–8 tokens clave (actor, accion, objeto, lugar/fecha si aporta).\n"
+        "- Sin nombres de medios, sin comillas, sin acentos.\n"
+        "- El MISMO evento contado en distintos medios debe dar el MISMO slug.\n"
+        f"Texto:\n{base}\n\nDevuelve SOLO el slug."
+    )
+    try:
+        resp = await openai_chat(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0, max_tokens=20
+        )
+        slug = (resp.choices[0].message.content or "").strip().lower()
+        slug = re.sub(r"[^a-z0-9\-]+", "-", slug)
+        slug = re.sub(r"-{2,}", "-", slug).strip("-")
+    except Exception:
+        txt = re.sub(r"[^a-z0-9 ]+", " ", (title + " " + first_paragraph).lower())
+        toks = [t for t in txt.split() if len(t) >= 4][:8]
+        slug = "-".join(toks) or hashlib.md5(txt.encode()).hexdigest()[:16]
+    return slug[:80]
+
+def is_event_key_dup(new_key: str, keys: deque, ratio: float = 0.86) -> bool:
+    for k in keys:
+        if new_key == k:
+            return True
+        if difflib.SequenceMatcher(None, new_key, k).ratio() >= ratio:
+            return True
+    return False
+
 # ------------------------- TELEGRAM ----------------------------
 async def notify_admin(message: str):
     if not ADMIN_CHAT_ID:
@@ -496,7 +543,7 @@ def feed_priority(url: str) -> int:
         return 10
 
 async def fetch_and_publish():
-    global published_titles, seen_urls, EVENT_FPS
+    global published_titles, seen_urls, EVENT_FPS, EVENT_KEYS
 
     published_count = 0
     feeds_sorted = sorted(RSS_FEEDS, key=feed_priority, reverse=True)
@@ -529,8 +576,14 @@ async def fetch_and_publish():
             if len(full_article.split()) < 80:
                 continue
 
-            # simhash дедуп по событию
-            fp = make_event_fingerprint(title, first_paragraph(full_article))
+            # === Жёсткий дедуп по каноническому ключу события ===
+            fp_first_para = first_paragraph(full_article)
+            event_key = await make_event_key(title, fp_first_para)
+            if is_event_key_dup(event_key, EVENT_KEYS):
+                continue
+
+            # === simhash дедуп по событию ===
+            fp = make_event_fingerprint(title, fp_first_para)
             if fp:
                 is_dup = any(hamming(fp, old) <= HAMMING_THRESHOLD_DUP for old in EVENT_FPS)
                 if is_dup:
@@ -545,7 +598,7 @@ async def fetch_and_publish():
                     except Exception as e:
                         logging.warning(f"mini GPT dedupe failed, continue without it: {e}")
 
-            # текст поста от GPT
+            # --- Генерируем тело поста
             try:
                 res = await improve_summary_with_gpt(title, full_article, clean_url)
             except Exception as e:
@@ -557,14 +610,12 @@ async def fetch_and_publish():
             body = safe_html_text(res["body"])
             body = drop_duplicate_title(title_html, body)
 
-            # доп. антидубль по Jaccard (дёшево и эффективно)
+            # дешёвый Jaccard по телу поста
             if is_jaccard_dup(body):
                 continue
 
-            # спрячем ссылку в тексте
+            # спрятать ссылку в тексте
             body = mask_link_in_body(body, clean_url)
-
-            gpt_tags_raw = res["tags"]
 
             # тема/эмодзи/теги
             first_sentence = (body.split('. ', 1)[0] or title)[:240]
@@ -574,36 +625,39 @@ async def fetch_and_publish():
 
             emoji = final_emoji_for_topic(topic, first_sentence)
             topic_tags = TOPIC_MAP.get(topic, {"tags": "#noticias"}).get("tags", "#noticias")
-            tags = merge_topic_and_gpt_tags(topic_tags, gpt_tags_raw, limit=3)
+            tags = merge_topic_and_gpt_tags(topic_tags, res["tags"], limit=3)
 
+            # сборка с учётом лимита caption
             image_url = extract_image(entry)
-
-            # Собираем и учитываем лимит caption 1024, чтобы подпись не отрезалась
             head = f"{emoji} {title_html}\n\n"
             tail_parts = []
             if tags:
                 tail_parts.append(tags.lower())
             tail_parts.append(CHANNEL_SIGNATURE)
-            tail = "\n\n".join(tail_parts)  # подпись отдельным абзацем
+            tail = "\n\n".join(tail_parts)
+
             if image_url:
                 budget = 1024 - len(head) - len("\n\n") - len(tail)
                 trimmed_body = body[:max(0, budget)]
-                caption = head + trimmed_body + "\n\n" + tail
-                final_payload = caption
+                payload = head + trimmed_body + "\n\n" + tail
             else:
-                final_payload = head + body + "\n\n" + tail
+                payload = head + body + "\n\n" + tail
 
             try:
                 for channel in CHANNEL_IDS:
-                    await send_message_or_photo(channel, image_url, final_payload)
+                    await send_message_or_photo(channel, image_url, payload)
 
+                # --- после успешной публикации фиксируем всё в кэшах
                 seen_urls.add(clean_url)
                 published_titles.add(norm_title)
                 if fp:
                     EVENT_FPS.append(fp)
+                EVENT_KEYS.append(event_key)
+
                 save_set(CACHE_URLS, seen_urls)
                 save_set(CACHE_TITLES, published_titles)
                 save_fps(CACHE_FPS, EVENT_FPS)
+                save_list(CACHE_EVENT_KEYS, list(EVENT_KEYS))
 
                 recent_summaries_for_gpt.append((full_article[:600]).replace("\n", " "))
                 RECENT_BODIES.append(normalize_tokens_for_jaccard(body))
