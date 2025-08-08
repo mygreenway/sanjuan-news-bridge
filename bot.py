@@ -30,19 +30,11 @@ ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 CHANNEL_IDS = ["@NoticiasEspanaHoy"]
 CHANNEL_SIGNATURE = '<a href="https://t.me/NoticiasEspanaHoy">📡 Noticias de España</a>'
 
-# Приоритет доменов (выше — раньше в обработке)
+# Приоритет доменов (выше — раньше)
 DOMAIN_PRIORITY = {
-    "elpais.com": 100,
-    "rtve.es": 95,
-    "elmundo.es": 92,
-    "lavanguardia.com": 90,
-    "abc.es": 88,
-    "elconfidencial.com": 85,
-    "20minutos.es": 80,
-    "europapress.es": 78,
-    "eldiario.es": 76,
-    "publico.es": 70,
-    "lasprovincias.es": 60,
+    "elpais.com": 100, "rtve.es": 95, "elmundo.es": 92, "lavanguardia.com": 90,
+    "abc.es": 88, "elconfidencial.com": 85, "20minutos.es": 80, "europapress.es": 78,
+    "eldiario.es": 76, "publico.es": 70, "lasprovincias.es": 60,
 }
 
 RSS_FEEDS = [
@@ -68,8 +60,8 @@ CACHE_URLS = "urls_cache.json"
 CACHE_FPS = "fps_cache.json"
 
 EVENT_FPS_MAXLEN = 300
-HAMMING_THRESHOLD_DUP = 4
-HAMMING_THRESHOLD_MAYBE = 5
+HAMMING_THRESHOLD_DUP = 6      # чуть мягче, чтобы кластеры лучше ловились
+HAMMING_THRESHOLD_MAYBE = 8
 
 # ------------------------- INIT CLIENTS --------------------------
 if not BOT_TOKEN or not OPENAI_API_KEY:
@@ -151,7 +143,7 @@ def safe_html_text(s: str) -> str:
     return s
 
 def drop_duplicate_title(title_html: str, body_text: str) -> str:
-    """Убираем первое предложение, если оно по сути дублирует заголовок."""
+    """Убираем первое предложение, если оно дублирует заголовок."""
     m = re.search(r'<b>(.*?)</b>', title_html, flags=re.S | re.I)
     title_plain = m.group(1) if m else ""
     def norm(x: str) -> str:
@@ -159,7 +151,6 @@ def drop_duplicate_title(title_html: str, body_text: str) -> str:
     t = norm(title_plain)
     if not t or not body_text:
         return body_text
-    # унификация кавычек и точек
     body = re.sub(r"[“”«»]", '"', body_text)
     body = re.sub(r"\s+\.\s+", ". ", body)
     first = body.split('. ', 1)[0]
@@ -172,25 +163,7 @@ def drop_duplicate_title(title_html: str, body_text: str) -> str:
         return body[len(first):].lstrip('. ').lstrip()
     return body
 
-def normalize_hashtags(s: str, limit: int = 3) -> str:
-    """До 3 нормализованных хештегов, строчными, уникальными."""
-    if not s:
-        return ""
-    raw = re.findall(r'#\w+|[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+', s)
-    tags, seen = [], set()
-    for tok in raw:
-        tag = tok.lower()
-        if not tag.startswith('#'):
-            tag = '#' + tag
-        tag = re.sub(r'[^#\wáéíóúñü]', '', tag)
-        if 2 <= len(tag) <= 32 and tag not in seen:
-            seen.add(tag)
-            tags.append(tag)
-        if len(tags) >= limit:
-            break
-    return " ".join(tags)
-
-# ---------------------- SIMHASH DEDUP --------------------------
+# ---------------------- LINK MASKING ---------------------------
 SPANISH_STOP = set("""
 de la que el en y a los del se las por un para con no una su al lo como más pero sus le ya o este
 sí porque esta entre cuando muy sin sobre también me hasta hay donde quien desde todo nos durante
@@ -204,6 +177,40 @@ estuvieron estuviera estuvieras estuviéramos estuvierais estuvieran estuviese e
 estuviésemos estuvieseis estuviesen estando estado estada estados estadas estad
 """.split())
 
+SPANISH_STOP_MIN = SPANISH_STOP | {
+    "gobierno","plan","ciudad","seguridad","ministro","presidente","nacional","oficial","medida",
+    "grupo","región","local","nueva","nuevo","según","contra","tras","donde","mientras","entre"
+}
+
+def mask_link_in_body(body_text: str, url: str) -> str:
+    """Спрятать ссылку в 1‑е подходящее «сильное» слово; если не нашли — (detalles) в конце 1‑го предложения."""
+    if not body_text or not url:
+        return body_text
+    plain = re.sub(r'<[^>]+>', '', body_text)
+    words = plain.split()
+    anchor_idx = -1
+    for i, w in enumerate(words):
+        ww = re.sub(r'[^0-9a-záéíóúñü]', '', w.lower())
+        if ww and (len(ww) >= 6 or ww.isdigit()) and ww not in SPANISH_STOP_MIN:
+            anchor_idx = i
+            break
+    if anchor_idx == -1:
+        first, *rest = body_text.split('. ', 1)
+        linked = first + f' (<a href="{html.escape(url)}">detalles</a>)'
+        return (linked + ('. ' + rest[0] if rest else '')).strip()
+
+    # аккуратно врапим соответствующее слово
+    def replacer(match):
+        token = match.group(0)
+        idx = replacer.i
+        replacer.i += 1
+        if idx == anchor_idx:
+            return f'<a href="{html.escape(url)}">{html.escape(token)}</a>'
+        return token
+    replacer.i = 0
+    return re.sub(r'([^\W_]+)', replacer, body_text, flags=re.UNICODE)
+
+# ---------------------- SIMHASH DEDUP --------------------------
 def tokenize_core(text: str) -> list:
     text = (text or "").lower()
     text = re.sub(r'https?://\S+', ' ', text)
@@ -230,6 +237,27 @@ def make_event_fingerprint(title: str, first_para: str) -> int:
     if len(toks) > 40:
         toks = toks[:40]
     return simhash64(toks) if toks else 0
+
+# --------- EXTRA: Jaccard-фильтр по телу поста (супер дешёвый) ----------
+RECENT_BODIES = deque(maxlen=120)
+
+def normalize_tokens_for_jaccard(text: str) -> set[str]:
+    t = (text or "").lower()
+    t = re.sub(r'https?://\S+', ' ', t)
+    t = re.sub(r'[^0-9a-záéíóúñü ]+', ' ', t)
+    toks = [w for w in t.split() if (len(w) >= 4 or w.isdigit()) and w not in SPANISH_STOP_MIN]
+    return set(toks[:120])
+
+def is_jaccard_dup(new_body: str, threshold: float = 0.55) -> bool:
+    cand = normalize_tokens_for_jaccard(new_body)
+    if not cand:
+        return False
+    for prev in RECENT_BODIES:
+        inter = len(cand & prev)
+        union = len(cand | prev) or 1
+        if inter / union >= threshold:
+            return True
+    return False
 
 # ---------------------- IMAGE EXTRACTION -----------------------
 def extract_image(entry) -> str:
@@ -287,7 +315,6 @@ TOPIC_MAP = {
 }
 
 COUNTRY_FLAG_MAP = {
-    # Europa
     "españa":"🇪🇸","reino unido":"🇬🇧","uk":"🇬🇧","gran bretaña":"🇬🇧","francia":"🇫🇷","alemania":"🇩🇪",
     "italia":"🇮🇹","portugal":"🇵🇹","países bajos":"🇳🇱","holanda":"🇳🇱","bélgica":"🇧🇪","suiza":"🇨🇭",
     "austria":"🇦🇹","suecia":"🇸🇪","noruega":"🇳🇴","dinamarca":"🇩🇰","finlandia":"🇫🇮","irlanda":"🇮🇪",
@@ -295,19 +322,14 @@ COUNTRY_FLAG_MAP = {
     "serbia":"🇷🇸","croacia":"🇭🇷","eslovenia":"🇸🇮","eslovaquia":"🇸🇰","letonia":"🇱🇻","lituania":"🇱🇹",
     "estonia":"🇪🇪","ucrania":"🇺🇦","rusia":"🇷🇺","moldavia":"🇲🇩","georgia":"🇬🇪","armenia":"🇦🇲",
     "albania":"🇦🇱","bosnia":"🇧🇦","macedonia":"🇲🇰","montenegro":"🇲🇪",
-    # América
     "estados unidos":"🇺🇸","eeuu":"🇺🇸","méxico":"🇲🇽","canadá":"🇨🇦","argentina":"🇦🇷","brasil":"🇧🇷",
     "chile":"🇨🇱","perú":"🇵🇪","colombia":"🇨🇴","uruguay":"🇺🇾","paraguay":"🇵🇾","ecuador":"🇪🇨",
     "bolivia":"🇧🇴","venezuela":"🇻🇪","panamá":"🇵🇦","cuba":"🇨🇺","república dominicana":"🇩🇴",
-    "puerto rico":"🇵🇷",
-    # Asia/África/ME
-    "china":"🇨🇳","india":"🇮🇳","japón":"🇯🇵","corea del sur":"🇰🇷","corea del norte":"🇰🇵","turquía":"🇹🇷",
-    "israel":"🇮🇱","palestina":"🇵🇸","arabia saudí":"🇸🇦","emiratos árabes unidos":"🇦🇪","qatar":"🇶🇦",
-    "irán":"🇮🇷","iraq":"🇮🇶","siria":"🇸🇾","líbano":"🇱🇧","jordania":"🇯🇴","egipto":"🇪🇬",
+    "puerto rico":"🇵🇷","china":"🇨🇳","india":"🇮🇳","japón":"🇯🇵","corea del sur":"🇰🇷","corea del norte":"🇰🇵",
+    "turquía":"🇹🇷","israel":"🇮🇱","palestina":"🇵🇸","arabia saudí":"🇸🇦","emiratos árabes unidos":"🇦🇪",
+    "qatar":"🇶🇦","irán":"🇮🇷","iraq":"🇮🇶","siria":"🇸🇾","líbano":"🇱🇧","jordania":"🇯🇴","egipto":"🇪🇬",
     "marruecos":"🇲🇦","argelia":"🇩🇿","túnez":"🇹🇳","sudáfrica":"🇿🇦","nigeria":"🇳🇬","etiopía":"🇪🇹",
-    "kenia":"🇰🇪",
-    # Org.
-    "unión europea":"🇪🇺","ue":"🇪🇺"
+    "kenia":"🇰🇪","unión europea":"🇪🇺","ue":"🇪🇺"
 }
 
 def extract_countries_from_text(text: str) -> list[str]:
@@ -320,8 +342,7 @@ def extract_countries_from_text(text: str) -> list[str]:
     uniq, seen = [], set()
     for n in sorted(found, key=len, reverse=True):
         if n not in seen:
-            seen.add(n)
-            uniq.append(n)
+            seen.add(n); uniq.append(n)
     return list(reversed(uniq))
 
 # --------------------- OPENAI HELPERS -------------------------
@@ -339,7 +360,6 @@ async def openai_chat(messages, model="gpt-4o", temperature=0.6, max_tokens=400,
     raise RuntimeError("OpenAI chat failed after retries")
 
 def extract_json_obj(raw: str) -> str | None:
-    # срезаем ```json / ``` и берём первый {...}
     cleaned = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", raw.strip(), flags=re.S)
     m = re.search(r"\{.*\}", cleaned, flags=re.S)
     return m.group(0) if m else None
@@ -347,7 +367,7 @@ def extract_json_obj(raw: str) -> str | None:
 async def improve_summary_with_gpt(title: str, full_article: str, link: str) -> dict:
     lower_link = (link or "").lower()
     max_length = 2000 if any(w in lower_link for w in
-        ["opinion", "opinión", "analisis", "análisis", "editorial", "tribuna"]) else 1500
+        ["opinion","opinión","analisis","análisis","editorial","tribuna"]) else 1500
     trimmed_article = full_article[:max_length]
 
     prompt = (
@@ -364,8 +384,7 @@ async def improve_summary_with_gpt(title: str, full_article: str, link: str) -> 
     resp = await openai_chat(
         model="gpt-4o",
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.6,
-        max_tokens=420
+        temperature=0.6, max_tokens=420
     )
     raw = (resp.choices[0].message.content or "").strip()
     try:
@@ -374,7 +393,6 @@ async def improve_summary_with_gpt(title: str, full_article: str, link: str) -> 
         body = str(data.get("body", "")).strip()
         tags = str(data.get("tags", "")).strip()
     except Exception:
-        # Fallback: берём сырой текст, режем до 400
         body = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", raw.strip(), flags=re.S)[:400]
         tags = ""
     return {"body": body, "tags": tags}
@@ -390,8 +408,7 @@ async def is_new_meaningful_gpt(candidate_summary: str, recent_summaries: list[s
     resp = await openai_chat(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": prompt}],
-        temperature=0,
-        max_tokens=10
+        temperature=0, max_tokens=10
     )
     ans = (resp.choices[0].message.content or "").strip().lower()
     return ans == "nueva"
@@ -406,8 +423,7 @@ async def detect_topic(text: str, fallback_title: str) -> str:
     resp = await openai_chat(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": prompt}],
-        temperature=0,
-        max_tokens=5
+        temperature=0, max_tokens=5
     )
     return (resp.choices[0].message.content or "").strip().lower()
 
@@ -419,9 +435,24 @@ def final_emoji_for_topic(topic: str, first_sentence: str) -> str:
             return COUNTRY_FLAG_MAP.get(countries[0], base)
     return base
 
+def normalize_hashtags(s: str, limit: int = 3) -> str:
+    if not s:
+        return ""
+    raw = re.findall(r'#\w+|[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+', s)
+    tags, seen = [], set()
+    for tok in raw:
+        tag = tok.lower()
+        if not tag.startswith('#'):
+            tag = '#' + tag
+        tag = re.sub(r'[^#\wáéíóúñü]', '', tag)
+        if 2 <= len(tag) <= 32 and tag not in seen:
+            seen.add(tag); tags.append(tag)
+        if len(tags) >= limit:
+            break
+    return " ".join(tags)
+
 def merge_topic_and_gpt_tags(topic_tags: str, gpt_tags: str, limit: int = 3) -> str:
-    merged = " ".join([topic_tags or "", gpt_tags or ""]).strip()
-    return normalize_hashtags(merged, limit=limit)
+    return normalize_hashtags(" ".join([topic_tags or "", gpt_tags or ""]).strip(), limit=limit)
 
 # ------------------------- TELEGRAM ----------------------------
 async def notify_admin(message: str):
@@ -432,15 +463,14 @@ async def notify_admin(message: str):
     except Exception as e:
         logging.error(f"Error notifying admin: {e}")
 
-async def send_with_retry(channel: str, image_url: str, text: str):
+async def send_message_or_photo(channel: str, image_url: str | None, caption_or_text: str):
     delay = 1.0
     for attempt in range(3):
         try:
             if image_url:
-                caption = text[:1024]  # лимит подписи у фото
-                await bot.send_photo(channel, image_url, caption=caption, parse_mode=ParseMode.HTML)
+                await bot.send_photo(channel, image_url, caption=caption_or_text, parse_mode=ParseMode.HTML)
             else:
-                await bot.send_message(channel, text, parse_mode=ParseMode.HTML, disable_web_page_preview=False)
+                await bot.send_message(channel, caption_or_text, parse_mode=ParseMode.HTML, disable_web_page_preview=False)
             return
         except Exception as e:
             logging.warning(f"Telegram send attempt {attempt+1} failed: {e}")
@@ -499,12 +529,13 @@ async def fetch_and_publish():
             if len(full_article.split()) < 80:
                 continue
 
+            # simhash дедуп по событию
             fp = make_event_fingerprint(title, first_paragraph(full_article))
             if fp:
                 is_dup = any(hamming(fp, old) <= HAMMING_THRESHOLD_DUP for old in EVENT_FPS)
                 if is_dup:
                     continue
-                maybe_dup = any(hamming(fp, old) == HAMMING_THRESHOLD_MAYBE for old in EVENT_FPS)
+                maybe_dup = any(hamming(fp, old) <= HAMMING_THRESHOLD_MAYBE for old in EVENT_FPS)
                 if maybe_dup:
                     candidate_summary = (full_article[:600]).replace("\n", " ")
                     try:
@@ -514,7 +545,7 @@ async def fetch_and_publish():
                     except Exception as e:
                         logging.warning(f"mini GPT dedupe failed, continue without it: {e}")
 
-            # --- Генерируем тело поста (без ссылок/эмодзи)
+            # текст поста от GPT
             try:
                 res = await improve_summary_with_gpt(title, full_article, clean_url)
             except Exception as e:
@@ -525,9 +556,17 @@ async def fetch_and_publish():
             title_html = f"<b>{safe_html_text(title)}</b>"
             body = safe_html_text(res["body"])
             body = drop_duplicate_title(title_html, body)
+
+            # доп. антидубль по Jaccard (дёшево и эффективно)
+            if is_jaccard_dup(body):
+                continue
+
+            # спрячем ссылку в тексте
+            body = mask_link_in_body(body, clean_url)
+
             gpt_tags_raw = res["tags"]
 
-            # --- Определение темы и эмодзи/тегов
+            # тема/эмодзи/теги
             first_sentence = (body.split('. ', 1)[0] or title)[:240]
             topic = await detect_topic(first_sentence, title)
             if topic not in TOPIC_MAP:
@@ -537,19 +576,26 @@ async def fetch_and_publish():
             topic_tags = TOPIC_MAP.get(topic, {"tags": "#noticias"}).get("tags", "#noticias")
             tags = merge_topic_and_gpt_tags(topic_tags, gpt_tags_raw, limit=3)
 
-            # --- Финальная сборка
-            leer_mas = f'🔗 <a href="{html.escape(clean_url)}">Leer más</a>'
-            parts = [f"{emoji} {title_html}", "", body, "", leer_mas]
-            if tags:
-                parts.append(tags.lower())
-            parts.append(CHANNEL_SIGNATURE)  # подпись канала внизу всегда
-            final_text = "\n".join(p for p in parts if p is not None).strip()
+            image_url = extract_image(entry)
 
-            image_url = extract_image(entry)  # если пусто — публикуем текст (без заглушек)
+            # Собираем и учитываем лимит caption 1024, чтобы подпись не отрезалась
+            head = f"{emoji} {title_html}\n\n"
+            tail_parts = []
+            if tags:
+                tail_parts.append(tags.lower())
+            tail_parts.append(CHANNEL_SIGNATURE)
+            tail = "\n\n".join(tail_parts)  # подпись отдельным абзацем
+            if image_url:
+                budget = 1024 - len(head) - len("\n\n") - len(tail)
+                trimmed_body = body[:max(0, budget)]
+                caption = head + trimmed_body + "\n\n" + tail
+                final_payload = caption
+            else:
+                final_payload = head + body + "\n\n" + tail
 
             try:
                 for channel in CHANNEL_IDS:
-                    await send_with_retry(channel, image_url, final_text)
+                    await send_message_or_photo(channel, image_url, final_payload)
 
                 seen_urls.add(clean_url)
                 published_titles.add(norm_title)
@@ -560,6 +606,7 @@ async def fetch_and_publish():
                 save_fps(CACHE_FPS, EVENT_FPS)
 
                 recent_summaries_for_gpt.append((full_article[:600]).replace("\n", " "))
+                RECENT_BODIES.append(normalize_tokens_for_jaccard(body))
 
                 published_count += 1
                 await asyncio.sleep(SLEEP_BETWEEN_POSTS_SEC)
