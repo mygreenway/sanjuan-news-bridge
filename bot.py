@@ -15,58 +15,69 @@ from telegram import Bot
 from telegram.constants import ParseMode
 from openai import AsyncOpenAI
 
-# ---------------------------- ЛОГИ ----------------------------
+# ---------------------------- LOGGING ----------------------------
 logging.basicConfig(
     filename='bot_log.log',
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-# ------------------------- НАСТРОЙКИ --------------------------
+# --------------------------- SETTINGS ----------------------------
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 
 CHANNEL_IDS = ["@NoticiasEspanaHoy"]
 
-# RSS-источники
+# Приоритет доменов (чем выше число — тем раньше обрабатываем фид)
+DOMAIN_PRIORITY = {
+    "elpais.com": 100,
+    "rtve.es": 95,
+    "elmundo.es": 92,
+    "lavanguardia.com": 90,
+    "abc.es": 88,
+    "elconfidencial.com": 85,
+    "20minutos.es": 80,
+    "europapress.es": 78,
+    "eldiario.es": 76,
+    "publico.es": 70,
+    "lasprovincias.es": 60,
+}
+
 RSS_FEEDS = [
-    "https://e00-elmundo.uecdn.es/elmundo/rss/portada.xml",
     "https://feeds.elpais.com/mrss/s/pages/ep/site/elpais.com/portada",
     "https://www.rtve.es/rss/portal/rss.xml",
+    "https://e00-elmundo.uecdn.es/elmundo/rss/portada.xml",
+    "https://www.lavanguardia.com/mvc/feed/rss/home",
+    "https://www.abc.es/rss/feeds/abcPortada.xml",
+    "https://www.elconfidencial.com/rss/espana.xml",
     "https://www.20minutos.es/rss/",
     "https://www.europapress.es/rss/rss.aspx",
-    "https://www.abc.es/rss/feeds/abcPortada.xml",
-    "https://www.lavanguardia.com/mvc/feed/rss/home",
-    "https://www.elconfidencial.com/rss/espana.xml",
     "https://www.eldiario.es/rss/",
     "https://www.publico.es/rss/",
     "https://www.lasprovincias.es/rss/2.0/portada/index.rss",
 ]
 
-# Ограничения публикаций
 MAX_PUBLICATIONS_PER_CYCLE = 5
 SLEEP_BETWEEN_POSTS_SEC = 5
-FETCH_EVERY_SEC = 1800  # 30 минут
+FETCH_EVERY_SEC = 1800  # 30 minutes
 
-# Кэш-файлы
-CACHE_TITLES = "titles_cache.json"       # set[str] нормализованные заголовки
-CACHE_URLS = "urls_cache.json"           # set[str] нормализованные URL
-CACHE_FPS = "fps_cache.json"             # list[int] последние simhash (ограничены по длине)
+CACHE_TITLES = "titles_cache.json"
+CACHE_URLS = "urls_cache.json"
+CACHE_FPS = "fps_cache.json"
 
-# Параметры дедупликации
-EVENT_FPS_MAXLEN = 300      # хранить до 300 отпечатков событий
-HAMMING_THRESHOLD_DUP = 4   # <=4 считаем дубль
-HAMMING_THRESHOLD_MAYBE = 5 # опциональный GPT-проверочный коридор (редко используется)
+EVENT_FPS_MAXLEN = 300
+HAMMING_THRESHOLD_DUP = 4
+HAMMING_THRESHOLD_MAYBE = 5
 
-# ----------------------- ИНИЦИАЛИЗАЦИЯ ------------------------
+# ------------------------- INIT CLIENTS --------------------------
 if not BOT_TOKEN or not OPENAI_API_KEY:
     raise RuntimeError("Missing TELEGRAM_BOT_TOKEN or OPENAI_API_KEY")
 
 bot = Bot(token=BOT_TOKEN)
 openai = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-# ---------------------- УТИЛИТЫ/КЭШИ --------------------------
+# --------------------------- CACHES ------------------------------
 def load_set(path: str) -> set:
     if os.path.exists(path):
         try:
@@ -101,13 +112,13 @@ def save_fps(path: str, dq: deque):
         with open(path, "w", encoding="utf-8") as f:
             json.dump(list(dq)[-EVENT_FPS_MAXLEN:], f, ensure_ascii=False, indent=2)
     except Exception as e:
-        logging.error(f"FPS cache save error: {e}")
+        logging.error(f"FPS cache save error ({path}): {e}")
 
 published_titles = load_set(CACHE_TITLES)
 seen_urls = load_set(CACHE_URLS)
 EVENT_FPS = load_fps(CACHE_FPS, EVENT_FPS_MAXLEN)
 
-# ---------------------- ТЕКСТ/HTML УТИЛИТЫ --------------------
+# ----------------------- TEXT/HTML UTILS ------------------------
 def normalize_title(title: str) -> str:
     t = re.sub(r'\s+', ' ', (title or '').strip().lower())
     t = re.sub(r'[^\wáéíóúñü ]+', '', t)
@@ -124,16 +135,13 @@ def normalize_url(url: str) -> str:
     return clean.lower()
 
 def safe_html_text(s: str) -> str:
-    """Экранируем HTML, оставляя только <b>, <i>, <u>, <a href="">."""
-    # временные маркеры
+    # keep only <b>, <i>, <u>, <a href="">
     s = s.replace('<b>', '§B§').replace('</b>', '§/B§')
     s = s.replace('<i>', '§I§').replace('</i>', '§/I§')
     s = s.replace('<u>', '§U§').replace('</u>', '§/U§')
     s = re.sub(r'<a\s+href="([^"]+)">', r'§A§\1§', s)
     s = s.replace('</a>', '§/A§')
-    # escape
     s = html.escape(s)
-    # восстановить разрешённые теги
     s = s.replace('§B§', '<b>').replace('§/B§', '</b>')
     s = s.replace('§I§', '<i>').replace('§/I§', '</i>')
     s = s.replace('§U§', '<u>').replace('§/U§', '</u>')
@@ -141,25 +149,47 @@ def safe_html_text(s: str) -> str:
     s = s.replace('§/A§', '</a>')
     return s
 
-def inject_link(improved_text: str, url: str) -> str:
-    """Пытаемся вставить ссылку во 2-е слово 2-й строки, иначе добавляем отдельной строкой."""
-    lines = [l for l in (improved_text or "").split("\n")]
-    link = f'<a href="{html.escape(url)}">más</a>'
-    if len(lines) >= 2 and lines[1].strip():
-        words = lines[1].split()
-        if len(words) >= 2:
-            # безопасно обернём второе слово ссылкой
-            words[1] = f'<a href="{html.escape(url)}">{safe_html_text(words[1])}</a>'
-            lines[1] = " ".join(words)
-            return "\n".join(lines)
-        else:
-            lines.append(link)
-            return "\n".join(lines)
-    else:
-        lines.append(link)
-        return "\n".join(lines)
+def drop_duplicate_title(title_html: str, body_text: str) -> str:
+    """Remove first sentence if it essentially repeats the title."""
+    m = re.search(r'<b>(.*?)</b>', title_html, flags=re.S | re.I)
+    title_plain = m.group(1) if m else ""
+    def norm(x: str) -> str:
+        return re.sub(r'\s+', ' ', re.sub(r'[^\wáéíóúñü ]+', '', (x or '').lower())).strip()
+    t = norm(title_plain)
+    if not t or not body_text:
+        return body_text
+    first = body_text.split('. ', 1)[0]
+    if not first:
+        return body_text
+    f = norm(first)
+    t_set, f_set = set(t.split()), set(f.split())
+    jacc = len(t_set & f_set) / max(1, len(t_set | f_set))
+    if jacc >= 0.6 or t.startswith(f) or f.startswith(t):
+        return body_text[len(first):].lstrip('. ').lstrip()
+    return body_text
 
-# --------------------- SIMHASH ДЕДУПЛИКАЦИЯ -------------------
+def normalize_hashtags(s: str, limit: int = 3) -> str:
+    """Возвращает до 3 нормализованных хештегов строчными, уникальными."""
+    if not s:
+        return ""
+    raw = re.findall(r'#\w+|[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+', s)
+    tags = []
+    seen = set()
+    for tok in raw:
+        tag = tok.lower()
+        if not tag.startswith('#'):
+            tag = '#' + tag
+        tag = re.sub(r'[^#\wáéíóúñü]', '', tag)
+        if len(tag) < 2 or len(tag) > 32:
+            continue
+        if tag not in seen:
+            seen.add(tag)
+            tags.append(tag)
+        if len(tags) >= limit:
+            break
+    return " ".join(tags)
+
+# ---------------------- SIMHASH DEDUP --------------------------
 SPANISH_STOP = set("""
 de la que el en y a los del se las por un para con no una su al lo como más pero sus le ya o este
 sí porque esta entre cuando muy sin sobre también me hasta hay donde quien desde todo nos durante
@@ -201,27 +231,23 @@ def make_event_fingerprint(title: str, first_para: str) -> int:
         toks = toks[:40]
     return simhash64(toks) if toks else 0
 
-# -------------------- ИЗВЛЕЧЕНИЕ КАРТИНОК ---------------------
+# ---------------------- IMAGE EXTRACTION -----------------------
 def extract_image(entry) -> str:
-    # 1) media_content
     try:
         mc = entry.get("media_content", [])
         if mc and mc[0].get("url"):
             return mc[0]["url"]
     except Exception:
         pass
-    # 2) media_thumbnail
     try:
         mt = entry.get("media_thumbnail", [])
         if mt and mt[0].get("url"):
             return mt[0]["url"]
     except Exception:
         pass
-    # 3) links из фида
     for l in entry.get("links", []):
         if l.get("type", "").startswith("image/") and l.get("href"):
             return l["href"]
-    # 4) из summary HTML
     for field in ("summary", "summary_detail"):
         html_blob = entry.get(field, "") or ""
         m = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', str(html_blob), re.I)
@@ -229,7 +255,7 @@ def extract_image(entry) -> str:
             return m.group(1)
     return ""
 
-# ------------------- ЗАГРУЗКА ПОЛНОГО ТЕКСТА ------------------
+# ---------------------- ARTICLE FETCH -------------------------
 def get_full_article(url: str, retries: int = 2) -> str:
     for attempt in range(1 + retries):
         try:
@@ -250,7 +276,97 @@ def get_full_article(url: str, retries: int = 2) -> str:
         time.sleep(0.7)
     return ""
 
-# -------------------- OPENAI ХЕЛПЕРЫ/РЕТРАИ -------------------
+# ---------------------- TOPIC/TAGS/EMOJI -----------------------
+TOPIC_MAP = {
+    "politica":      {"emoji": "🏛", "tags": "#españa #política"},
+    "economia":      {"emoji": "💶", "tags": "#economía #negocios"},
+    "deportes":      {"emoji": "⚽", "tags": "#deportes #españa"},
+    "sucesos":       {"emoji": "🚨", "tags": "#sucesos #últimahora"},
+    "ciencia":       {"emoji": "🔬", "tags": "#ciencia #investigación"},
+    "cultura":       {"emoji": "🎭", "tags": "#cultura #arte"},
+    "clima":         {"emoji": "🌦", "tags": "#clima #tiempo"},
+    "internacional": {"emoji": "🌍", "tags": "#internacional"},
+    "tecnologia":    {"emoji": "💻", "tags": "#tecnología #innovación"},
+    "salud":         {"emoji": "🩺", "tags": "#salud #bienestar"},
+}
+
+COUNTRY_FLAG_MAP = {
+    # Europa
+    "españa":"🇪🇸","reino unido":"🇬🇧","uk":"🇬🇧","gran bretaña":"🇬🇧","francia":"🇫🇷","alemania":"🇩🇪",
+    "italia":"🇮🇹","portugal":"🇵🇹","países bajos":"🇳🇱","holanda":"🇳🇱","bélgica":"🇧🇪","suiza":"🇨🇭",
+    "austria":"🇦🇹","suecia":"🇸🇪","noruega":"🇳🇴","dinamarca":"🇩🇰","finlandia":"🇫🇮","irlanda":"🇮🇪",
+    "polonia":"🇵🇱","grecia":"🇬🇷","chequia":"🇨🇿","hungría":"🇭🇺","rumanía":"🇷🇴","bulgaria":"🇧🇬",
+    "serbia":"🇷🇸","croacia":"🇭🇷","eslovenia":"🇸🇮","eslovaquia":"🇸🇰","letonia":"🇱🇻","lituania":"🇱🇹",
+    "estonia":"🇪🇪","ucrania":"🇺🇦","rusia":"🇷🇺","moldavia":"🇲🇩","georgia":"🇬🇪","armenia":"🇦🇲",
+    "albania":"🇦🇱","bosnia":"🇧🇦","macedonia":"🇲🇰","montenegro":"🇲🇪",
+    # América
+    "estados unidos":"🇺🇸","eeuu":"🇺🇸","méxico":"🇲🇽","canadá":"🇨🇦","argentina":"🇦🇷","brasil":"🇧🇷",
+    "chile":"🇨🇱","perú":"🇵🇪","colombia":"🇨🇴","uruguay":"🇺🇾","paraguay":"🇵🇾","ecuador":"🇪🇨",
+    "bolivia":"🇧🇴","venezuela":"🇻🇪","panamá":"🇵🇦","cuba":"🇨🇺","república dominicana":"🇩🇴",
+    "puerto rico":"🇵🇷",
+    # Asia/África/ME
+    "china":"🇨🇳","india":"🇮🇳","japón":"🇯🇵","corea del sur":"🇰🇷","corea del norte":"🇰🇵","turquía":"🇹🇷",
+    "israel":"🇮🇱","palestina":"🇵🇸","arabia saudí":"🇸🇦","emiratos árabes unidos":"🇦🇪","qatar":"🇶🇦",
+    "irán":"🇮🇷","iraq":"🇮🇶","siria":"🇸🇾","líbano":"🇱🇧","jordania":"🇯🇴","egipto":"🇪🇬",
+    "marruecos":"🇲🇦","argelia":"🇩🇿","túnez":"🇹🇳","sudáfrica":"🇿🇦","nigeria":"🇳🇬","etiopía":"🇪🇹",
+    "kenia":"🇰🇪",
+    # Organizaciones
+    "unión europea":"🇪🇺","ue":"🇪🇺"
+}
+
+def extract_countries_from_text(text: str) -> list[str]:
+    t = (text or "").lower()
+    t = re.sub(r'[^\wáéíóúñü ]+', ' ', t)
+    found = []
+    for name in COUNTRY_FLAG_MAP.keys():
+        # грубый поиск по словам/фразам
+        pattern = r'\b' + re.escape(name) + r'\b'
+        if re.search(pattern, t):
+            found.append(name)
+    # уникальные, в порядке появления по длине (длинные фразы приоритетнее)
+    uniq = []
+    seen = set()
+    for n in sorted(found, key=len, reverse=True):
+        if n not in seen:
+            seen.add(n)
+            uniq.append(n)
+    return list(reversed(uniq))  # более короткие ближе к концу
+
+def choose_emoji_and_tags_by_topic(first_sentence: str, fallback_title: str) -> tuple[str, str, str]:
+    """Возвращает (emoji, topic, topic_tags)"""
+    # Тема из GPT-mini (дёшево и точно)
+    async def detect_topic(text: str) -> str:
+        prompt = (
+            "Analiza la noticia y responde SOLO con una palabra de esta lista: "
+            "politica, economia, deportes, sucesos, ciencia, cultura, clima, internacional, tecnologia, salud.\n"
+            "Elige la que mejor describa el tema principal.\n"
+            "Texto:\n" + (text or fallback_title)
+        )
+        resp = await openai.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=5
+        )
+        return (resp.choices[0].message.content or "").strip().lower()
+
+    # Поскольку это sync оболочка, вернём корутину наружу
+    return detect_topic(first_sentence or fallback_title)  # type: ignore
+
+def final_emoji_for_topic(topic: str, first_sentence: str) -> str:
+    base = TOPIC_MAP.get(topic, {"emoji": "📰"})["emoji"]
+    if topic == "internacional":
+        countries = extract_countries_from_text(first_sentence)
+        if len(countries) == 1:
+            return COUNTRY_FLAG_MAP.get(countries[0], base)
+    return base
+
+def merge_topic_and_gpt_tags(topic_tags: str, gpt_tags: str, limit: int = 3) -> str:
+    # склейка и нормализация
+    merged = " ".join([topic_tags or "", gpt_tags or ""]).strip()
+    return normalize_hashtags(merged, limit=limit)
+
+# --------------------- OPENAI HELPERS -------------------------
 async def openai_chat(messages, model="gpt-4o", temperature=0.6, max_tokens=400, retries=2):
     delay = 1.0
     for attempt in range(retries + 1):
@@ -268,36 +384,41 @@ async def openai_chat(messages, model="gpt-4o", temperature=0.6, max_tokens=400,
             delay *= 2
     raise RuntimeError("OpenAI chat failed after retries")
 
-async def improve_summary_with_gpt(title: str, full_article: str, link: str) -> str:
+async def improve_summary_with_gpt(title: str, full_article: str, link: str) -> dict:
     lower_link = (link or "").lower()
-    if any(w in lower_link for w in ["opinion", "opinión", "analisis", "análisis", "editorial", "tribuna"]):
-        max_length = 2000
-    else:
-        max_length = 1500
-
+    max_length = 2000 if any(w in lower_link for w in
+        ["opinion", "opinión", "analisis", "análisis", "editorial", "tribuna"]) else 1500
     trimmed_article = full_article[:max_length]
+
     prompt = (
-        "Escribe una publicación para Telegram sobre la siguiente noticia. Sigue este formato ESTRICTAMENTE:\n\n"
-        "1) Primera línea: un emoji temático y el título en negrita usando <b> ... </b> (NO uses **).\n"
-        "2) Luego un párrafo (máx. 400 caracteres) que resuma claramente la noticia. No repitas el título.\n"
-        "3) No añadas ningún enlace. Solo texto.\n"
-        "4) Última línea: 2 o 3 hashtags relevantes, separados por espacios.\n\n"
-        f"Título: {title}\n\nTexto:\n{trimmed_article}"
+        "Escribe contenido para un post de Telegram sobre la noticia. Reglas ESTRICTAS:\n"
+        "1) NO repitas el título en el texto: si el primer enunciado coincide con el título, reescríbelo.\n"
+        "2) Texto: máx. 400 caracteres, claro y directo.\n"
+        "3) No incluyas enlaces en el cuerpo.\n"
+        "4) Devuelve JSON con dos campos: {\"body\": \"...\", \"tags\": \"#tag1 #tag2\"}\n"
+        "5) No uses comillas dentro de los valores.\n\n"
+        f"Título: {title}\n\nTexto fuente:\n{trimmed_article}"
     )
 
     resp = await openai_chat(
         model="gpt-4o",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.6,
-        max_tokens=400
+        max_tokens=420
     )
-    text = resp.choices[0].message.content.strip()
-    # Безопасный размер для caption фото
-    return text[:1000]
+    raw = resp.choices[0].message.content.strip()
+    import json as _json
+    try:
+        data = _json.loads(raw)
+        body = str(data.get("body", "")).strip()
+        tags = str(data.get("tags", "")).strip()
+    except Exception:
+        body = raw[:400]
+        tags = ""
+    return {"body": body, "tags": tags}
 
 async def is_new_meaningful_gpt(candidate_summary: str, recent_summaries: list[str]) -> bool:
-    """Опциональная дешёвая проверка через gpt-4o-mini, если расстояние пограничное."""
-    joined = "\n".join(f"- {s}" for s in recent_summaries[-10:])  # сравнение только с 10 последними
+    joined = "\n".join(f"- {s}" for s in recent_summaries[-10:])
     prompt = (
         "Analiza si la siguiente noticia ya fue publicada. "
         "Considera 'repetida' si trata sobre el mismo evento, aunque cambien palabras, títulos o cifras.\n\n"
@@ -313,7 +434,7 @@ async def is_new_meaningful_gpt(candidate_summary: str, recent_summaries: list[s
     ans = (resp.choices[0].message.content or "").strip().lower()
     return ans == "nueva"
 
-# ------------------------- ТЕЛЕГРАМ ---------------------------
+# ------------------------- TELEGRAM ----------------------------
 async def notify_admin(message: str):
     if not ADMIN_CHAT_ID:
         return
@@ -327,11 +448,9 @@ async def send_with_retry(channel: str, image_url: str, text: str):
     for attempt in range(3):
         try:
             if image_url:
-                # caption у фото ≤ 1024
-                caption = text[:1024]
+                caption = text[:1024]  # Telegram photo caption limit
                 await bot.send_photo(channel, image_url, caption=caption, parse_mode=ParseMode.HTML)
             else:
-                # без картинки оставляем превью ссылок включённым (красивые карточки)
                 await bot.send_message(channel, text, parse_mode=ParseMode.HTML, disable_web_page_preview=False)
             return
         except Exception as e:
@@ -340,8 +459,8 @@ async def send_with_retry(channel: str, image_url: str, text: str):
             delay *= 2
     raise RuntimeError("Telegram send failed after retries")
 
-# --------------------- ОСНОВНАЯ ЛОГИКА ------------------------
-recent_summaries_for_gpt = deque(maxlen=50)  # короткие резюме для редкой GPT-проверки
+# ---------------------- MAIN PIPELINE --------------------------
+recent_summaries_for_gpt = deque(maxlen=50)
 
 def first_paragraph(text: str) -> str:
     if not text:
@@ -349,56 +468,56 @@ def first_paragraph(text: str) -> str:
     para = text.strip().split("\n", 1)[0]
     return para[:400]
 
+def feed_priority(url: str) -> int:
+    try:
+        host = urllib.parse.urlsplit(url).netloc
+        parts = host.split('.')
+        domain = ".".join(parts[-2:]) if len(parts) >= 2 else host
+        return DOMAIN_PRIORITY.get(domain, 10)
+    except Exception:
+        return 10
+
 async def fetch_and_publish():
     global published_titles, seen_urls, EVENT_FPS
 
     published_count = 0
+    feeds_sorted = sorted(RSS_FEEDS, key=feed_priority, reverse=True)
 
-    for feed_url in RSS_FEEDS:
+    for feed_url in feeds_sorted:
         try:
             feed = feedparser.parse(feed_url)
         except Exception as e:
             logging.warning(f"feedparser error {feed_url}: {e}")
             continue
 
-        # берём только свежий топ: [:1] — экономим запросы/спам
         for entry in feed.entries[:1]:
             if published_count >= MAX_PUBLICATIONS_PER_CYCLE:
                 return
 
             raw_title = entry.title if hasattr(entry, "title") else ""
-            # Некоторые фиды пихают источник перед заголовком: "El País: Título..."
             title = re.sub(r'^[^:|]+[|:]\s*', '', raw_title).strip()
 
             norm_title = normalize_title(title)
             clean_url = normalize_url(getattr(entry, "link", ""))
 
-            # Фильтр 0: точные дубли по URL/заголовку
             if not clean_url:
                 continue
             if clean_url in seen_urls or norm_title in published_titles:
                 continue
 
-            # Полный текст
             full_article = get_full_article(clean_url)
-            # если не получилось — fallback на summary
             if not full_article:
                 full_article = getattr(entry, "summary", "") or ""
-            # минимальная длина контента
             if len(full_article.split()) < 80:
                 continue
 
-            # Дешёвый смысловой фильтр: simhash title + 1-й абзац
             fp = make_event_fingerprint(title, first_paragraph(full_article))
             if fp:
-                # проверка на схожесть с последними отпечатками
                 is_dup = any(hamming(fp, old) <= HAMMING_THRESHOLD_DUP for old in EVENT_FPS)
                 if is_dup:
                     continue
-                # редкая пограничная проверка через GPT-mini
                 maybe_dup = any(hamming(fp, old) == HAMMING_THRESHOLD_MAYBE for old in EVENT_FPS)
                 if maybe_dup:
-                    # дешёвое короткое резюме для сравнения
                     candidate_summary = (full_article[:600]).replace("\n", " ")
                     try:
                         still_new = await is_new_meaningful_gpt(candidate_summary, list(recent_summaries_for_gpt))
@@ -407,29 +526,43 @@ async def fetch_and_publish():
                     except Exception as e:
                         logging.warning(f"mini GPT dedupe failed, continue without it: {e}")
 
-            # Генерация финального текста
+            # Текст поста от GPT (без ссылок/эмодзи)
             try:
-                improved_text = await improve_summary_with_gpt(title, full_article, clean_url)
+                res = await improve_summary_with_gpt(title, full_article, clean_url)
             except Exception as e:
                 logging.error(f"OpenAI improve_summary error: {e}")
                 await notify_admin(f"❌ OpenAI error: {e}")
                 continue
 
-            # Безопасный HTML и вставка ссылки
-            improved_text = safe_html_text(improved_text)
-            improved_text = inject_link(improved_text, clean_url)
+            title_html = f"<b>{safe_html_text(title)}</b>"
+            body = safe_html_text(res["body"])
+            body = drop_duplicate_title(title_html, body)
+            gpt_tags_raw = res["tags"]
 
-            # Подпись-бренд
-            improved_text += '\n\n<a href="https://t.me/NoticiasEspanaHoy">📡 Noticias de España</a>'
+            # Определяем тему (gpt-4o-mini на 1-ю фразу) и подбираем эмодзи/теги
+            first_sentence = (body.split('. ', 1)[0] or title)[:240]
 
-            # Картинка
-            image_url = extract_image(entry)
+            # detect_topic возвращает корутину -> ждём:
+            topic = await choose_emoji_and_tags_by_topic(first_sentence, title)
+            if not isinstance(topic, str) or topic not in TOPIC_MAP:
+                topic = "internacional" if extract_countries_from_text(first_sentence) else "politica"
 
-            # Публикация
+            emoji = final_emoji_for_topic(topic, first_sentence)
+            topic_tags = TOPIC_MAP.get(topic, {"tags": "#noticias"}).get("tags", "#noticias")
+            tags = merge_topic_and_gpt_tags(topic_tags, gpt_tags_raw, limit=3)
+
+            leer_mas = f'🔗 <a href="{html.escape(clean_url)}">Leer más</a>'
+            parts = [f"{emoji} {title_html}", "", body, "", leer_mas]
+            if tags:
+                parts.append(tags)
+            final_text = "\n".join(p for p in parts if p is not None).strip()
+
+            image_url = extract_image(entry)  # если пусто — публикуем текст (без заглушек)
+
             try:
                 for channel in CHANNEL_IDS:
-                    await send_with_retry(channel, image_url, improved_text)
-                # Обновляем кэши только после успеха
+                    await send_with_retry(channel, image_url, final_text)
+
                 seen_urls.add(clean_url)
                 published_titles.add(norm_title)
                 if fp:
@@ -438,7 +571,6 @@ async def fetch_and_publish():
                 save_set(CACHE_TITLES, published_titles)
                 save_fps(CACHE_FPS, EVENT_FPS)
 
-                # Сохраним короткий конспект для редкой GPT-проверки (дёшево)
                 recent_summaries_for_gpt.append((full_article[:600]).replace("\n", " "))
 
                 published_count += 1
@@ -447,7 +579,6 @@ async def fetch_and_publish():
             except Exception as e:
                 logging.error(f"Telegram error: {e}")
                 await notify_admin(f"❌ Error publicación: {e}")
-                # не записываем в кэши если не получилось отправить
 
 async def main_loop():
     while True:
