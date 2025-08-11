@@ -59,7 +59,7 @@ FETCH_EVERY_SEC = 1800  # 30 минут
 CACHE_TITLES = "titles_cache.json"
 CACHE_URLS = "urls_cache.json"
 CACHE_FPS = "fps_cache.json"
-CACHE_EVENT_KEYS = "event_keys.json"  # кэш канонических ключей события
+CACHE_EVENT_KEYS = "event_keys.json"
 
 EVENT_FPS_MAXLEN = 300
 HAMMING_THRESHOLD_DUP = 6
@@ -180,7 +180,7 @@ def drop_duplicate_title(title_html: str, body_text: str) -> str:
         return body[len(first):].lstrip('. ').lstrip()
     return body
 
-# ---------------------- SIMHASH + JACCARD ----------------------
+# ---------------------- LINK MASKING ---------------------------
 SPANISH_STOP = set("""
 de la que el en y a los del se las por un para con no una su al lo como más pero sus le ya o este
 sí porque esta entre cuando muy sin sobre también me hasta hay donde quien desde todo nos durante
@@ -196,9 +196,36 @@ estuviésemos estuvieseis estuviesen estando estado estada estados estadas estad
 
 SPANISH_STOP_MIN = SPANISH_STOP | {
     "gobierno","plan","ciudad","seguridad","ministro","presidente","nacional","oficial","medida",
-    "grupo","región","local","nueva","nuevo","según","contra","tras","donde","mientras","entre"
+    "grupo","región","local","nueva","nuevo","según","contra","tras","donde","мientras","entre"
 }
 
+def mask_link_in_body(body_text: str, url: str) -> str:
+    if not body_text or not url:
+        return body_text
+    plain = re.sub(r'<[^>]+>', '', body_text)
+    words = plain.split()
+    anchor_idx = -1
+    for i, w in enumerate(words):
+        ww = re.sub(r'[^0-9a-záéíóúñü]', '', w.lower())
+        if ww and (len(ww) >= 6 or ww.isdigit()) and ww not in SPANISH_STOP_MIN:
+            anchor_idx = i
+            break
+    if anchor_idx == -1:
+        first, *rest = body_text.split('. ', 1)
+        linked = first + f' (<a href="{html.escape(url)}">detalles</a>)'
+        return (linked + ('. ' + rest[0] if rest else '')).strip()
+
+    def replacer(match):
+        token = match.group(0)
+        idx = replacer.i
+        replacer.i += 1
+        if idx == anchor_idx:
+            return f'<a href="{html.escape(url)}">{html.escape(token)}</a>'
+        return token
+    replacer.i = 0
+    return re.sub(r'([^\W_]+)', replacer, body_text, flags=re.UNICODE)
+
+# ---------------------- SIMHASH + JACCARD ----------------------
 def tokenize_core(text: str) -> list:
     text = (text or "").lower()
     text = re.sub(r'https?://\S+', ' ', text)
@@ -292,8 +319,66 @@ def first_paragraph(text: str) -> str:
     para = text.strip().split("\n", 1)[0]
     return para[:400]
 
+# --------------------- TOPIC/EMOJI (детерминированно) ----------
+TOPIC_EMOJI = {
+    "politica": "🏛", "economia": "💶", "deportes": "⚽", "sucesos": "🚨",
+    "ciencia": "🔬", "cultura": "🎭", "clima": "🌦", "internacional": "🌍",
+    "tecnologia": "💻", "salud": "🩺"
+}
+
+COUNTRY_FLAG_MAP = {
+    "españa":"🇪🇸","reino unido":"🇬🇧","uk":"🇬🇧","gran bretaña":"🇬🇧","francia":"🇫🇷","alemania":"🇩🇪",
+    "italia":"🇮🇹","portugal":"🇵🇹","países bajos":"🇳🇱","holanda":"🇳🇱","bélgica":"🇧🇪",
+    "suiza":"🇨🇭","austria":"🇦🇹","suecia":"🇸🇪","noruega":"🇳🇴","dinamarca":"🇩🇰","finlandia":"🇫🇮",
+    "irlanda":"🇮🇪","polonia":"🇵🇱","grecia":"🇬🇷","chequia":"🇨🇿","hungría":"🇭🇺","rumanía":"🇷🇴",
+    "bulgaria":"🇧🇬","serbia":"🇷🇸","croacia":"🇭🇷","eslovenia":"🇸🇮","eslovaquia":"🇸🇰",
+    "letonia":"🇱🇻","lituania":"🇱🇹","estonia":"🇪🇪","ucrania":"🇺🇦","rusia":"🇷🇺","moldavia":"🇲🇩",
+    "georgia":"🇬🇪","armenia":"🇦🇲","albania":"🇦🇱","bosnia":"🇧🇦","macedonia":"🇲🇰","montenegro":"🇲🇪",
+    "estados unidos":"🇺🇸","eeuu":"🇺🇸","méxico":"🇲🇽","canadá":"🇨🇦","argentina":"🇦🇷","brasil":"🇧🇷",
+    "chile":"🇨🇱","perú":"🇵🇪","colombia":"🇨🇴","uruguay":"🇺🇾","paraguay":"🇵🇾","ecuador":"🇪🇨",
+    "bolivia":"🇧🇴","venezuela":"🇻🇪","panamá":"🇵🇦","china":"🇨🇳","india":"🇮🇳","japón":"🇯🇵",
+    "corea del sur":"🇰🇷","turquía":"🇹🇷","israel":"🇮🇱","palestina":"🇵🇸","emiratos árabes unidos":"🇦🇪",
+    "qatar":"🇶🇦","irán":"🇮🇷","iraq":"🇮🇶","egipto":"🇪🇬","marruecos":"🇲🇦","sudáfrica":"🇿🇦"
+}
+
+TOPIC_KEYWORDS = {
+    "economia": ["empleo","paro","inflación","pib","economía","mercado","contratos","salario","hacienda"],
+    "politica": ["gobierno","congreso","senado","pp","psoe","vox","sumar","ministro","presidente","coalición","tribunal"],
+    "deportes": ["liga","champions","partido","selección","fichaje","gol","tenis","baloncesto"],
+    "sucesos": ["detenido","agresión","incendio","accidente","investigación","asalto","tiroteo"],
+    "ciencia": ["investigación","estudio","científicos","universidad","descubrimiento"],
+    "tecnologia": ["tecnología","ciber","ia","inteligencia artificial","app","software","plataforma"],
+    "salud": ["salud","virus","covid","gripe","hospital","sanidad","vacuna"],
+    "clima": ["ola de calor","lluvias","tormenta","temperaturas","sequía","meteo"],
+    "cultura": ["festival","cine","museo","teatro","literatura","arte"],
+}
+
+def extract_countries_from_text(text: str) -> list[str]:
+    t = (text or "").lower()
+    t = re.sub(r'[^\wáéíóúñü ]+', ' ', t)
+    found = [name for name in COUNTRY_FLAG_MAP if re.search(r'\b'+re.escape(name)+r'\b', t)]
+    uniq, seen = [], set()
+    for n in sorted(found, key=len, reverse=True):
+        if n not in seen:
+            seen.add(n); uniq.append(n)
+    return list(reversed(uniq))
+
+def classify_topic(text: str) -> str:
+    t = (text or "").lower()
+    for topic, kws in TOPIC_KEYWORDS.items():
+        if any(k in t for k in kws):
+            return topic
+    return "internacional" if extract_countries_from_text(t) else "politica"
+
+def final_emoji_deterministic(text: str) -> str:
+    countries = extract_countries_from_text(text)
+    if len(countries) == 1:
+        return COUNTRY_FLAG_MAP.get(countries[0], "📰")
+    topic = classify_topic(text)
+    return TOPIC_EMOJI.get(topic, "📰")
+
 # --------------------- OPENAI HELPERS -------------------------
-async def openai_chat(messages, model="gpt-4o-mini", temperature=0.3, max_tokens=500, retries=2):
+async def openai_chat(messages, model="gpt-4o-mini", temperature=0.2, max_tokens=500, retries=2):
     delay = 1.0
     for attempt in range(retries + 1):
         try:
@@ -329,60 +414,44 @@ def normalize_hashtags(s: str, limit: int = 3) -> str:
 
 async def generate_full_post_with_gpt(source_title: str, full_article: str) -> dict:
     """
-    Возвращает JSON: {"title": "...", "emoji": "…", "body": "...", "tags": "#a #b"}
-    Правила:
-    - Заголовок: испанский, 70–110 символов, информативный, без кавычек и ЭМОДЗИ, первая буква заглавная.
-    - Эмодзи: ровно 1 (флаг допускается, если явно одна главная страна; иначе тематическое).
-    - Текст: <= 400 символов, без ссылок, без повторения смысла заголовка в первом предложении.
-    - Теги: 1–3 штуки максимум. Можно словами без # — мы нормализуем.
-    - Ответ строго JSON без ```.
+    Возвращает: {"title": "...", "body": "...", "tags": "..."}
+    Правила тела: 1–2 предложения, 220–320 символов, без воды и вводных, без ссылок,
+    не повторять смысл заголовка — давать новый факт (цифра/кто/что дальше).
     """
-    max_length = 1800
-    trimmed_article = (full_article or "")[:max_length]
-
+    trimmed_article = (full_article or "")[:1800]
     prompt = (
-        "Escribe los campos para un post de Telegram sobre esta noticia. Reglas ESTRICTAS:\n"
+        "Genera campos para un post de Telegram. Reglas ESTRICTAS:\n"
         "1) Titular en español, 70–110 caracteres, informativo y específico, sin comillas ni emojis. Primera letra en mayúscula.\n"
-        "2) Un solo emoji temático (puede ser bandera SOLO si hay un único país protagonista claro; si hay varios o no está claro, usa temático, no banderas).\n"
-        "3) Cuerpo conciso (máximo 400 caracteres), sin enlaces. No repitas el título en el primer enunciado: si coincide, reformúlalo.\n"
-        "4) 1–3 etiquetas temáticas.\n"
-        "5) Devuelve JSON en texto plano, sin bloques de código ni ```.\n"
-        "   Formato: {\"title\":\"...\",\"emoji\":\"...\",\"body\":\"...\",\"tags\":\"#tag1 #tag2\"}\n\n"
-        f"Título origen: {source_title}\n\n"
-        f"Texto fuente:\n{trimmed_article}"
+        "2) Cuerpo: 1–2 oraciones, 220–320 caracteres. Empieza por el dato principal (qué/quién/dónde y cifra). "
+        "Nada de muletillas ('Este lunes', 'En el marco de', 'Cabe señalar'). Sin enlaces. "
+        "NO repitas el título: aporta un dato nuevo, avance, cifra o consecuencia.\n"
+        "3) 1–3 etiquetas temáticas.\n"
+        "4) Responde SOLO JSON sin ``` con formato {\"title\":\"...\",\"body\":\"...\",\"tags\":\"#...\"}\n\n"
+        f"Título origen: {source_title}\n\nTexto fuente:\n{trimmed_article}"
     )
-
-    resp = await openai_chat(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.3, max_tokens=520
-    )
+    resp = await openai_chat(model="gpt-4o-mini",
+                             messages=[{"role":"user","content":prompt}],
+                             temperature=0.2, max_tokens=520)
     raw = (resp.choices[0].message.content or "").strip()
     jtxt = extract_json_obj(raw) or raw
 
-    # Блок страховки парсинга и формата
-    title, emoji, body, tags = source_title, "📰", "", ""
+    title, body, tags = source_title, "", ""
     try:
         data = json.loads(jtxt)
-        title = re.sub(r'[\"“”«»]+', '', str(data.get("title", "")).strip())
-        emoji = str(data.get("emoji", "")).strip()
-        body = str(data.get("body", "")).strip()
-        tags = str(data.get("tags", "")).strip()
+        title = re.sub(r'[\"“”«»]+', '', str(data.get("title","")).strip())
+        body  = str(data.get("body","")).strip()
+        tags  = str(data.get("tags","")).strip()
     except Exception as e:
         logging.warning(f"JSON parse fallback: {e}; raw={raw[:200]}")
 
-    # Мини-валидации
     if not title or len(title) < 40:
         fp = first_paragraph(full_article)
         title = (fp[:100] + "…") if fp else (source_title[:100] or "Actualidad")
 
-    # Оставляем один символ эмодзи (некоторые флаги занимают 2 code units — это ок для Telegram)
-    # Если GPT вернул несколько — обрежем до первого "графемного" символа на глаз (~2 юникодных)
-    emoji = emoji[:2] if emoji else "📰"
+    body = re.sub(r'\s+', ' ', body)[:340]
     tags = normalize_hashtags(tags, limit=3)
 
-    # Тело без повторения заголовка ещё раз проверим ниже (drop_duplicate_title)
-    return {"title": title, "emoji": emoji, "body": body, "tags": tags}
+    return {"title": title, "body": body, "tags": tags}
 
 async def is_new_meaningful_gpt(candidate_summary: str, recent_summaries: list[str]) -> bool:
     joined = "\n".join(f"- {s}" for s in recent_summaries[-10:])
@@ -482,13 +551,11 @@ async def fetch_and_publish():
             logging.warning(f"feedparser error {feed_url}: {e}")
             continue
 
-        # по одному самому свежему элементу из каждого фида (как и раньше)
         for entry in feed.entries[:1]:
             if published_count >= MAX_PUBLICATIONS_PER_CYCLE:
                 return
 
             raw_title = entry.title if hasattr(entry, "title") else ""
-            # срез префикса типа "Sección: Título"
             title = re.sub(r'^[^:|]+[|:]\s*', '', raw_title).strip()
 
             norm_title = normalize_title(title)
@@ -527,11 +594,10 @@ async def fetch_and_publish():
                     except Exception as e:
                         logging.warning(f"mini GPT dedupe failed, continue without it: {e}")
 
-            # === ЕДИНЫЙ GPT-ВЫЗОВ: заголовок + эмодзи + тело + теги
+            # === GPT: заголовок/текст/теги
             try:
                 g = await generate_full_post_with_gpt(title, full_article)
                 gpt_title = g["title"]
-                gpt_emoji = g["emoji"]
                 body = g["body"]
                 tags = g["tags"]
             except Exception as e:
@@ -547,16 +613,21 @@ async def fetch_and_publish():
             if is_jaccard_dup(body):
                 continue
 
-            # СБОРКА ХВОСТА: «Leer más» отдельной строкой, затем теги, затем подпись канала
-            leer_mas = f'<a href="{html.escape(clean_url)}">Leer más</a>'
-            tail_parts = [leer_mas]
+            # Скрытая ссылка в ключевом слове текста
+            body = mask_link_in_body(body, clean_url)
+
+            # Эмодзи — строго по правилам
+            emoji = final_emoji_deterministic(gpt_title + " " + body)
+
+            # Хвост: теги и подпись канала
+            tail_parts = []
             if tags:
                 tail_parts.append(tags.lower())
             tail_parts.append(CHANNEL_SIGNATURE)
             tail = "\n\n".join(tail_parts)
 
             image_url = extract_image(entry)
-            head = f"{gpt_emoji} {title_html}\n\n"
+            head = f"{emoji} {title_html}\n\n"
 
             if image_url:
                 budget = 1024 - len(head) - len("\n\n") - len(tail)
