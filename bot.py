@@ -31,7 +31,7 @@ ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 CHANNEL_IDS = ["@NoticiasEspanaHoy"]
 CHANNEL_SIGNATURE = '<a href="https://t.me/NoticiasEspanaHoy">📡 Noticias de España</a>'
 
-# Приоритет доменов (выше — раньше)
+# Приоритет доменов
 DOMAIN_PRIORITY = {
     "elpais.com": 100, "rtve.es": 95, "elmundo.es": 92, "lavanguardia.com": 90,
     "abc.es": 88, "elconfidencial.com": 85, "20minutos.es": 80, "europapress.es": 78,
@@ -107,7 +107,7 @@ def save_fps(path: str, dq: deque):
         with open(path, "w", encoding="utf-8") as f:
             json.dump(list(dq)[-EVENT_FPS_MAXLEN:], f, ensure_ascii=False, indent=2)
     except Exception as e:
-        logging.error(f"FPS cache save error ({path}): {e}")
+        logging.error(f"Cache save error ({path}): {e}")
 
 def load_list(path: str) -> list:
     if os.path.exists(path):
@@ -196,7 +196,7 @@ estuviésemos estuvieseis estuviesen estando estado estada estados estadas estad
 
 SPANISH_STOP_MIN = SPANISH_STOP | {
     "gobierno","plan","ciudad","seguridad","ministro","presidente","nacional","oficial","medida",
-    "grupo","región","local","nueva","nuevo","según","contra","tras","donde","мientras","entre"
+    "grupo","región","local","nueva","nuevo","según","contra","tras","donde","mientras","entre"
 }
 
 def mask_link_in_body(body_text: str, url: str) -> str:
@@ -350,7 +350,7 @@ TOPIC_KEYWORDS = {
     "tecnologia": ["tecnología","ciber","ia","inteligencia artificial","app","software","plataforma"],
     "salud": ["salud","virus","covid","gripe","hospital","sanidad","vacuna"],
     "clima": ["ola de calor","lluvias","tormenta","temperaturas","sequía","meteo"],
-    "cultura": ["festival","cine","museo","teatro","literatura","arte"],
+    "cultura": ["festival","cine","мuseo","teatro","literatura","arte"],
 }
 
 def extract_countries_from_text(text: str) -> list[str]:
@@ -414,9 +414,10 @@ def normalize_hashtags(s: str, limit: int = 3) -> str:
 
 async def generate_full_post_with_gpt(source_title: str, full_article: str) -> dict:
     """
-    Возвращает: {"title": "...", "body": "...", "tags": "..."}
-    Правила тела: 1–2 предложения, 220–320 символов, без воды и вводных, без ссылок,
-    не повторять смысл заголовка — давать новый факт (цифра/кто/что дальше).
+    GPT генерирует: {"title": "...", "body": "...", "tags": "..."}
+    (Эмодзи НЕ генерируем у GPT.)
+    Правила тела: 1–2 предложения, 220–320 символов, без воды/вводных, без ссылок,
+    не повторять смысл заголовка — дать новый факт/цифру/последствие.
     """
     trimmed_article = (full_article or "")[:1800]
     prompt = (
@@ -450,7 +451,6 @@ async def generate_full_post_with_gpt(source_title: str, full_article: str) -> d
 
     body = re.sub(r'\s+', ' ', body)[:340]
     tags = normalize_hashtags(tags, limit=3)
-
     return {"title": title, "body": body, "tags": tags}
 
 async def is_new_meaningful_gpt(candidate_summary: str, recent_summaries: list[str]) -> bool:
@@ -594,7 +594,7 @@ async def fetch_and_publish():
                     except Exception as e:
                         logging.warning(f"mini GPT dedupe failed, continue without it: {e}")
 
-            # === GPT: заголовок/текст/теги
+            # === GPT: заголовок/текст/теги (эмодзи не просим)
             try:
                 g = await generate_full_post_with_gpt(title, full_article)
                 gpt_title = g["title"]
@@ -613,10 +613,10 @@ async def fetch_and_publish():
             if is_jaccard_dup(body):
                 continue
 
-            # Скрытая ссылка в ключевом слове текста
+            # Скрытая ссылка в ключевом слове
             body = mask_link_in_body(body, clean_url)
 
-            # Эмодзи — строго по правилам
+            # Эмодзи — строго по правилам бота
             emoji = final_emoji_deterministic(gpt_title + " " + body)
 
             # Хвост: теги и подпись канала
@@ -640,7 +640,7 @@ async def fetch_and_publish():
                 for channel in CHANNEL_IDS:
                     await send_message_or_photo(channel, image_url, payload)
 
-                # --- после успешной публикации фиксируем всё в кэшах
+                # --- кэши
                 seen_urls.add(clean_url)
                 published_titles.add(normalize_title(gpt_title) or norm_title)
                 if fp:
