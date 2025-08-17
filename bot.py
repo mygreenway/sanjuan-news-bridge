@@ -204,11 +204,6 @@ def drop_duplicate_title(title_html: str, body_text: str) -> str:
         return body[len(first):].lstrip('. ').lstrip()
     return body
 
-# ---------------------- LINK (не используем в новой схеме) -----
-def mask_link_in_body(body_text: str, url: str) -> str:
-    # Оставлено для совместимости; больше не вызывается
-    return body_text
-
 # ---------------------- SIMHASH + JACCARD ----------------------
 SPANISH_STOP = set("""
 de la que el en y a los del se las por un para con no una su al lo como más pero sus le ya o este
@@ -227,6 +222,33 @@ SPANISH_STOP_MIN = SPANISH_STOP | {
     "gobierno","plan","ciudad","seguridad","ministro","presidente","nacional","oficial","medida",
     "grupo","región","local","nueva","nuevo","según","contra","tras","donde","mientras","entre"
 }
+
+def mask_link_in_body(body_text: str, url: str) -> str:
+    """Спрятать ссылку в первом подходящем слове тела поста."""
+    if not body_text or not url:
+        return body_text
+    plain = re.sub(r'<[^>]+>', '', body_text)
+    words = plain.split()
+    anchor_idx = -1
+    for i, w in enumerate(words):
+        ww = re.sub(r'[^0-9a-záéíóúñü]', '', w.lower())
+        if ww and (len(ww) >= 6 or ww.isdigit()) and ww not in SPANISH_STOP_MIN:
+            anchor_idx = i
+            break
+    if anchor_idx == -1:
+        first, *rest = body_text.split('. ', 1)
+        linked = first + f' (<a href="{html.escape(url)}">detalles</a>)'
+        return (linked + ('. ' + rest[0] if rest else '')).strip()
+
+    def replacer(match):
+        token = match.group(0)
+        idx = replacer.i
+        replacer.i += 1
+        if idx == anchor_idx:
+            return f'<a href="{html.escape(url)}">{html.escape(token)}</a>'
+        return token
+    replacer.i = 0
+    return re.sub(r'([^\W_]+)', replacer, body_text, flags=re.UNICODE)
 
 def tokenize_core(text: str) -> list:
     text = (text or "").lower()
@@ -319,7 +341,7 @@ SPORT_KEYWORDS = {
 }
 CLIMA = {
     "clima_lluvia": ["lluvia","tormenta","granizo","borrasca","inundación"],
-    "clima_calor": ["ola de calor","temperaturas récord","temperatura máxima","bochorno","alerta roja por calor"],
+    "clima_calор": ["ola de calor","temperaturas récord","temperatura máxima","bochorno","alerta roja por calor"],
     "clima_viento": ["viento","rachas","temporal","ciclón","huracán"],
 }
 ECON_UP = ["sube","crece","récord","máximo","acelera","alza"]
@@ -338,16 +360,16 @@ COUNTRY_FLAG_MAP = {
     "suiza":"🇨🇭","austria":"🇦🇹","suecia":"🇸🇪","noruega":"🇳🇴","dinamarca":"🇩🇰","finlandia":"🇫🇮",
     "irlanda":"🇮🇪","polonia":"🇵🇱","grecia":"🇬🇷","chequia":"🇨🇿","hungría":"🇭🇺","rumanía":"🇷🇴",
     "bulgaria":"🇧🇬","serbia":"🇷🇸","croacia":"🇭🇷","eslovenia":"🇸🇮","eslovaquia":"🇸🇰",
-    "letonia":"🇱🇻","lituania":"🇱🇹","estonia":"🇪🇪","ucrania":"🇺🇦","rusia":"🇷🇺","moldavia":"🇲🇩",
+    "letonia":"🇱🇻","lituania":"🇱🇹","estonia":"🇪🇪","ucrania":"🇺🇦","рusia":"🇷🇺","moldavia":"🇲🇩",
     "georgia":"🇬🇪","armenia":"🇦🇲","albania":"🇦🇱","bosnia":"🇧🇦","macedonia":"🇲🇰","montenegro":"🇲🇪",
     "estados unidos":"🇺🇸","eeuu":"🇺🇸","méxico":"🇲🇽","canadá":"🇨🇦","argentina":"🇦🇷","brasil":"🇧🇷",
     "chile":"🇨🇱","perú":"🇵🇪","colombia":"🇨🇴","uruguay":"🇺🇾","paraguay":"🇵🇾","ecuador":"🇪🇨",
     "bolivia":"🇧🇴","venezuela":"🇻🇪","panamá":"🇵🇦","china":"🇨🇳","india":"🇮🇳","japón":"🇯🇵",
-    "corea del sur":"🇰🇷","turquía":"🇹🇷","israel":"🇮🇱","palestina":"🇵🇸","emiratos árabes unidos":"🇦🇪",
+    "corea del sur":"🇰🇷","turquía":"🇹🇷","israel":"🇮🇱","palestина":"🇵🇸","emiratos árabes unidos":"🇦🇪",
     "qatar":"🇶🇦","irán":"🇮🇷","iraq":"🇮🇶","egipto":"🇪🇬","marruecos":"🇲🇦","sudáfrica":"🇿🇦"
 }
 
-MAX_FLAGS = 4  # максимум флагов, если стран много
+MAX_FLAGS = 4
 
 def _has_any(text: str, keywords: list[str]) -> bool:
     t = text.lower()
@@ -375,8 +397,7 @@ def flags_for_countries(countries: list[str]) -> str:
     if len(cc) == 1:
         return COUNTRY_FLAG_MAP.get(cc[0], "")
     if 2 <= len(cc) <= MAX_FLAGS:
-        out = []
-        seen = set()
+        out, seen = [], set()
         for c in cc:
             f = COUNTRY_FLAG_MAP.get(c)
             if f and f not in seen:
@@ -387,7 +408,7 @@ def flags_for_countries(countries: list[str]) -> str:
 def _economy_signal(text: str) -> str | None:
     t = text.lower()
     has_num = bool(re.search(r'(\b\d{1,3}(?:[.,]\d{1,2})?\s*%|\b\d{1,3}(?:[.,]\d{3})+|\b\d+[.,]?\d*\s*(?:€|euros|millones|miles))', t))
-    econ_word = _has_any(t, ["inflación","ipc","paro","desempleo","pib","salario","hacienda","déficit","deuda","mercado","bolsa","ibex"])
+    econ_word = _has_any(t, ["inflación","ipc","paro","desempleo","pib","salario","hacienda","déficit","deuda","mercado","bolса","ibex"])
     if not (has_num or econ_word):
         return None
     if any(w in t for w in ECON_UP):
@@ -398,51 +419,35 @@ def _economy_signal(text: str) -> str | None:
 
 def final_emoji_deterministic(text: str) -> str:
     t = (text or "").lower()
-
-    # 1) Спорт
     for rx, key in SPORT_PATTERNS:
         if rx.search(t):
             return TOPIC_EMOJI[key]
     for key, kws in SPORT_KEYWORDS.items():
         if _has_any(t, kws):
             return TOPIC_EMOJI[key]
-
-    # 2) Погода
     for key, kws in CLIMA.items():
         if _has_any(t, kws):
             return TOPIC_EMOJI.get(key, TOPIC_EMOJI["clima_general"])
-
-    # 3) Экономика
     econ = _economy_signal(t)
     if econ:
         fl = flags_for_countries(extract_countries_from_text(t))
         return fl or TOPIC_EMOJI[econ]
-
-    # 4) ЧП
     for key, kws in SUCE.items():
         if _has_any(t, kws):
             fl = flags_for_countries(extract_countries_from_text(t))
             return fl or TOPIC_EMOJI[key]
-
-    # 5) Технологии / 6) Здоровье
     if _has_any(t, TEC):
         fl = flags_for_countries(extract_countries_from_text(t))
         return fl or TOPIC_EMOJI["tecnologia"]
     if _has_any(t, SALUD):
         fl = flags_for_countries(extract_countries_from_text(t))
         return fl or TOPIC_EMOJI["salud"]
-
-    # 7) Политика
     if _has_any(t, ["gobierno","congreso","senado","ministro","presidente","decreto","ley","elecciones","coalición","tribunal"]):
         fl = flags_for_countries(extract_countries_from_text(t))
         return fl or TOPIC_EMOJI["politica"]
-
-    # 8) Международка
     fl = flags_for_countries(extract_countries_from_text(t))
     if fl:
         return fl
-
-    # 9) Дефолт
     return TOPIC_EMOJI["default"]
 
 # --------------------- OPENAI HELPERS -------------------------
@@ -481,12 +486,6 @@ def normalize_hashtags(s: str, limit: int = 3) -> str:
     return " ".join(tags)
 
 async def generate_full_post_with_gpt(source_title: str, full_article: str) -> dict:
-    """
-    GPT генерирует: {"title": "...", "body": "...", "tags": "..."}
-    (Эмодзи НЕ генерируем у GPT.)
-    Правила тела: 1–2 предложения, 220–320 символов, без воды/вводных, без ссылок,
-    не повторять смысл заголовка — дать новый факт/цифру/последствие.
-    """
     trimmed_article = (full_article or "")[:1800]
     prompt = (
         "Genera campos para un post de Telegram. Reglas ESTRICTAS:\n"
@@ -537,7 +536,7 @@ async def is_new_meaningful_gpt(candidate_summary: str, recent_summaries: list[s
     ans = (resp.choices[0].message.content or "").strip().lower()
     return ans == "nueva"
 
-# ---------------------- EVENT KEY (жёсткий дедуп) ----------------------
+# ---------------------- EVENT KEY ----------------------
 async def make_event_key(title: str, first_paragraph_text: str) -> str:
     base = (title + " " + first_paragraph_text)[:600]
     prompt = (
@@ -617,7 +616,7 @@ def _score_url_quality(u: str) -> int:
     if m:
         w = int(m.group(1))
         h = int(m.group(2)) if m.group(2) else w
-        score += min(w, h) // 10  # ~70 очков за 700px
+        score += min(w, h) // 10
     if any(hint in url for hint in BAD_IMG_HINTS): score -= 30
     if "og:image" in url or "twitter" in url: score += 10
     if url.startswith("data:") or len(url) < 10: score -= 100
@@ -746,22 +745,21 @@ async def fetch_and_publish():
             if len(full_article.split()) < 80:
                 continue
 
-            # === Жёсткий дедуп по каноническому ключу события ===
+            # === Жёсткий дедуп по событию ===
             fp_first_para = first_paragraph(full_article)
             event_key = await make_event_key(title, fp_first_para)
             if is_event_key_dup(event_key, EVENT_KEYS):
                 continue
 
-            # === Кластер событий 48ч ===
+            # === Кластер 48ч ===
             cleanup_event_cluster(EVENT_CLUSTER)
             if is_same_event_recent(event_key, EVENT_CLUSTER, sim_ratio=0.90):
                 continue
 
-            # === simhash дедуп по событию ===
+            # === simhash дедуп ===
             fp = make_event_fingerprint(title, fp_first_para)
             if fp:
-                is_dup = any(hamming(fp, old) <= HAMMING_THRESHOLD_DUP for old in EVENT_FPS)
-                if is_dup:
+                if any(hamming(fp, old) <= HAMMING_THRESHOLD_DUP for old in EVENT_FPS):
                     continue
                 maybe_dup = any(hamming(fp, old) <= HAMMING_THRESHOLD_MAYBE for old in EVENT_FPS)
                 if maybe_dup:
@@ -773,7 +771,7 @@ async def fetch_and_publish():
                     except Exception as e:
                         logging.warning(f"mini GPT dedupe failed, continue without it: {e}")
 
-            # === GPT: заголовок/текст/теги (эмодзи не просим)
+            # === GPT: заголовок/текст/теги
             try:
                 g = await generate_full_post_with_gpt(title, full_article)
                 gpt_title = g["title"]
@@ -784,7 +782,7 @@ async def fetch_and_publish():
                 await notify_admin(f"❌ OpenAI error: {e}")
                 continue
 
-            # Быстрый анти-дубль по заголовку (сырые последние заголовки)
+            # Быстрый анти-дубль по заголовку
             if any(titles_near_dup(gpt_title, old) for old in last_titles_raw[-120:]):
                 continue
 
@@ -796,16 +794,18 @@ async def fetch_and_publish():
             if is_jaccard_dup(body):
                 continue
 
-            # Эмодзи — детерминированный, с мульти-флагами
+            # Вставляем скрытую ссылку в ключевое слово
+            body = mask_link_in_body(body, clean_url)
+
+            # Эмодзи
             emoji = final_emoji_deterministic(gpt_title + " " + body)
 
-            # Хвост: «Leer más» отдельной строкой, затем теги, затем подпись
-            leer_mas = f'<a href="{html.escape(clean_url)}">Leer más</a>'
-            tail_parts = [leer_mas]
+            # Хвост: только хэштеги и подпись канала; каждый блок отдельным абзацем
+            tail_parts = []
             if tags:
                 tail_parts.append(tags.lower())
             tail_parts.append(CHANNEL_SIGNATURE)
-            tail = "\n".join(tail_parts)
+            tail = "\n\n".join(tail_parts)
 
             image_url = extract_image(entry, page_html)
             head = f"{emoji} {title_html}\n\n"
