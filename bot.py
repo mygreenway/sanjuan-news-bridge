@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os
 import re
 import json
@@ -60,10 +61,13 @@ CACHE_TITLES = "titles_cache.json"
 CACHE_URLS = "urls_cache.json"
 CACHE_FPS = "fps_cache.json"
 CACHE_EVENT_KEYS = "event_keys.json"
+CACHE_EVENT_CLUSTER = "event_cluster.json"   # slug -> {ts,url,title}
+CACHE_LAST_TITLES = "last_titles.json"       # сырые последние заголовки
 
 EVENT_FPS_MAXLEN = 300
 HAMMING_THRESHOLD_DUP = 6
 HAMMING_THRESHOLD_MAYBE = 8
+EVENT_CLUSTER_TTL_SEC = 48 * 3600  # 48 часов
 
 # ------------------------- INIT CLIENTS --------------------------
 if not BOT_TOKEN or not OPENAI_API_KEY:
@@ -125,10 +129,30 @@ def save_list(path: str, data: list, maxlen: int = 400):
     except Exception as e:
         logging.error(f"Cache save error ({path}): {e}")
 
+def load_dict(path: str) -> dict:
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logging.warning(f"Cache load warning ({path}): {e}")
+    return {}
+
+def save_dict(path: str, data: dict, max_items: int = 2000):
+    try:
+        items = sorted(data.items(), key=lambda kv: kv[1].get("ts", 0))[-max_items:]
+        to_save = {k: v for k, v in items}
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(to_save, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logging.error(f"Cache save error ({path}): {e}")
+
 published_titles = load_set(CACHE_TITLES)
 seen_urls = load_set(CACHE_URLS)
 EVENT_FPS = load_fps(CACHE_FPS, EVENT_FPS_MAXLEN)
-EVENT_KEYS = deque(load_list(CACHE_EVENT_KEYS), maxlen=400)
+EVENT_KEYS = deque(load_list(CACHE_EVENT_KEYS), maxlen=1000)
+EVENT_CLUSTER = load_dict(CACHE_EVENT_CLUSTER)
+last_titles_raw = load_list(CACHE_LAST_TITLES)
 
 # ----------------------- TEXT/HTML UTILS ------------------------
 def normalize_title(title: str) -> str:
@@ -180,7 +204,12 @@ def drop_duplicate_title(title_html: str, body_text: str) -> str:
         return body[len(first):].lstrip('. ').lstrip()
     return body
 
-# ---------------------- LINK MASKING ---------------------------
+# ---------------------- LINK (не используем в новой схеме) -----
+def mask_link_in_body(body_text: str, url: str) -> str:
+    # Оставлено для совместимости; больше не вызывается
+    return body_text
+
+# ---------------------- SIMHASH + JACCARD ----------------------
 SPANISH_STOP = set("""
 de la que el en y a los del se las por un para con no una su al lo como más pero sus le ya o este
 sí porque esta entre cuando muy sin sobre también me hasta hay donde quien desde todo nos durante
@@ -199,33 +228,6 @@ SPANISH_STOP_MIN = SPANISH_STOP | {
     "grupo","región","local","nueva","nuevo","según","contra","tras","donde","mientras","entre"
 }
 
-def mask_link_in_body(body_text: str, url: str) -> str:
-    if not body_text or not url:
-        return body_text
-    plain = re.sub(r'<[^>]+>', '', body_text)
-    words = plain.split()
-    anchor_idx = -1
-    for i, w in enumerate(words):
-        ww = re.sub(r'[^0-9a-záéíóúñü]', '', w.lower())
-        if ww and (len(ww) >= 6 or ww.isdigit()) and ww not in SPANISH_STOP_MIN:
-            anchor_idx = i
-            break
-    if anchor_idx == -1:
-        first, *rest = body_text.split('. ', 1)
-        linked = first + f' (<a href="{html.escape(url)}">detalles</a>)'
-        return (linked + ('. ' + rest[0] if rest else '')).strip()
-
-    def replacer(match):
-        token = match.group(0)
-        idx = replacer.i
-        replacer.i += 1
-        if idx == anchor_idx:
-            return f'<a href="{html.escape(url)}">{html.escape(token)}</a>'
-        return token
-    replacer.i = 0
-    return re.sub(r'([^\W_]+)', replacer, body_text, flags=re.UNICODE)
-
-# ---------------------- SIMHASH + JACCARD ----------------------
 def tokenize_core(text: str) -> list:
     text = (text or "").lower()
     text = re.sub(r'https?://\S+', ' ', text)
@@ -273,45 +275,23 @@ def is_jaccard_dup(new_body: str, threshold: float = 0.55) -> bool:
             return True
     return False
 
-# ---------------------- ARTICLE FETCH -------------------------
-def extract_image(entry) -> str:
-    try:
-        mc = entry.get("media_content", [])
-        if mc and mc[0].get("url"):
-            return mc[0]["url"]
-    except Exception:
-        pass
-    try:
-        mt = entry.get("media_thumbnail", [])
-        if mt and mt[0].get("url"):
-            return mt[0]["url"]
-    except Exception:
-        pass
-    for l in entry.get("links", []):
-        if l.get("type", "").startswith("image/") and l.get("href"):
-            return l["href"]
-    for field in ("summary", "summary_detail"):
-        html_blob = entry.get(field, "") or ""
-        m = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', str(html_blob), re.I)
-        if m:
-            return m.group(1)
-    return ""
-
-def get_full_article(url: str, retries: int = 2) -> str:
+# ---------------------- ARTICLE FETCH (HTML+текст) --------------
+def get_full_article(url: str, retries: int = 2) -> tuple[str, str]:
+    last_html = ""
     for attempt in range(1 + retries):
         try:
             downloaded = trafilatura.fetch_url(url, no_ssl=True)
-            if not downloaded:
-                time.sleep(0.5); continue
-            text = trafilatura.extract(
-                downloaded, include_comments=False, include_tables=False, favor_precision=True
-            )
-            if text and len(text.split()) >= 60:
-                return text
+            if downloaded:
+                last_html = downloaded
+                text = trafilatura.extract(
+                    downloaded, include_comments=False, include_tables=False, favor_precision=True
+                )
+                if text and len(text.split()) >= 60:
+                    return text, downloaded
         except Exception as e:
             logging.warning(f"trafilatura fail: {e}")
         time.sleep(0.7)
-    return ""
+    return "", last_html
 
 def first_paragraph(text: str) -> str:
     if not text:
@@ -319,12 +299,38 @@ def first_paragraph(text: str) -> str:
     para = text.strip().split("\n", 1)[0]
     return para[:400]
 
-# --------------------- TOPIC/EMOJI (детерминированно) ----------
+# --------------------- EMOJI ENGINE (мульти-флаги) --------------
 TOPIC_EMOJI = {
-    "politica": "🏛", "economia": "💶", "deportes": "⚽", "sucesos": "🚨",
-    "ciencia": "🔬", "cultura": "🎭", "clima": "🌦", "internacional": "🌍",
-    "tecnologia": "💻", "salud": "🩺"
+    "politica": "🏛", "economia_up": "📈", "economia_down": "📉", "economia": "💶",
+    "deportes_futbol": "⚽", "deportes_basket": "🏀", "deportes_tenis": "🎾",
+    "sucesos": "🚨", "incendio": "🔥", "accidente_trafico": "🚗",
+    "ciencia": "🔬", "tecnologia": "🤖", "salud": "🩺", "clima_lluvia": "🌧️",
+    "clima_calor": "🔥", "clima_viento": "🌬️", "clima_general": "🌦️",
+    "internacional": "🌍", "default": "📰"
 }
+
+SPORT_PATTERNS = [
+    (re.compile(r'\b(\d+)\s*[-:]\s*(\d+)\b'), "deportes_futbol"),
+]
+SPORT_KEYWORDS = {
+    "deportes_futbol": ["liga","champions","copa del rey","fichaje","gol","penalti","real madrid","barça","fc barcelona","atlético","selección"],
+    "deportes_basket": ["acb","euroliga","baloncesto","nba","triple","rebote"],
+    "deportes_tenis": ["tenis","wimbledon","roland garros","us open","australian open","match point","sets"]
+}
+CLIMA = {
+    "clima_lluvia": ["lluvia","tormenta","granizo","borrasca","inundación"],
+    "clima_calor": ["ola de calor","temperaturas récord","temperatura máxima","bochorno","alerta roja por calor"],
+    "clima_viento": ["viento","rachas","temporal","ciclón","huracán"],
+}
+ECON_UP = ["sube","crece","récord","máximo","acelera","alza"]
+ECON_DOWN = ["cae","baja","desplome","mínimo","recesión","en contracción"]
+SUCE = {
+    "incendio": ["incendio","fuego","forestal"],
+    "accidente_trafico": ["accidente de tráfico","choque","colisión","atropello"],
+    "sucesos": ["detenido","agresión","tiroteo","linchamiento","investigación policial","allanamiento"]
+}
+TEC = ["tecnología","ia","inteligencia artificial","ciberataque","app","plataforma","software","algoritmo","robot"]
+SALUD = ["salud","hospital","sanidad","vacuna","brotes","virus","gripe","covid"]
 
 COUNTRY_FLAG_MAP = {
     "españa":"🇪🇸","reino unido":"🇬🇧","uk":"🇬🇧","gran bretaña":"🇬🇧","francia":"🇫🇷","alemania":"🇩🇪",
@@ -341,17 +347,11 @@ COUNTRY_FLAG_MAP = {
     "qatar":"🇶🇦","irán":"🇮🇷","iraq":"🇮🇶","egipto":"🇪🇬","marruecos":"🇲🇦","sudáfrica":"🇿🇦"
 }
 
-TOPIC_KEYWORDS = {
-    "economia": ["empleo","paro","inflación","pib","economía","mercado","contratos","salario","hacienda"],
-    "politica": ["gobierno","congreso","senado","pp","psoe","vox","sumar","ministro","presidente","coalición","tribunal"],
-    "deportes": ["liga","champions","partido","selección","fichaje","gol","tenis","baloncesto"],
-    "sucesos": ["detenido","agresión","incendio","accidente","investigación","asalto","tiroteo"],
-    "ciencia": ["investigación","estudio","científicos","universidad","descubrimiento"],
-    "tecnologia": ["tecnología","ciber","ia","inteligencia artificial","app","software","plataforma"],
-    "salud": ["salud","virus","covid","gripe","hospital","sanidad","vacuna"],
-    "clima": ["ola de calor","lluvias","tormenta","temperaturas","sequía","meteo"],
-    "cultura": ["festival","cine","мuseo","teatro","literatura","arte"],
-}
+MAX_FLAGS = 4  # максимум флагов, если стран много
+
+def _has_any(text: str, keywords: list[str]) -> bool:
+    t = text.lower()
+    return any(k in t for k in keywords)
 
 def extract_countries_from_text(text: str) -> list[str]:
     t = (text or "").lower()
@@ -363,19 +363,87 @@ def extract_countries_from_text(text: str) -> list[str]:
             seen.add(n); uniq.append(n)
     return list(reversed(uniq))
 
-def classify_topic(text: str) -> str:
-    t = (text or "").lower()
-    for topic, kws in TOPIC_KEYWORDS.items():
-        if any(k in t for k in kws):
-            return topic
-    return "internacional" if extract_countries_from_text(t) else "politica"
+def reorder_countries(countries: list[str]) -> list[str]:
+    if "españa" in countries:
+        return ["españa"] + [c for c in countries if c != "españa"]
+    return countries
+
+def flags_for_countries(countries: list[str]) -> str:
+    if not countries:
+        return ""
+    cc = reorder_countries(countries)
+    if len(cc) == 1:
+        return COUNTRY_FLAG_MAP.get(cc[0], "")
+    if 2 <= len(cc) <= MAX_FLAGS:
+        out = []
+        seen = set()
+        for c in cc:
+            f = COUNTRY_FLAG_MAP.get(c)
+            if f and f not in seen:
+                out.append(f); seen.add(f)
+        return "".join(out) if out else ""
+    return "🌍"
+
+def _economy_signal(text: str) -> str | None:
+    t = text.lower()
+    has_num = bool(re.search(r'(\b\d{1,3}(?:[.,]\d{1,2})?\s*%|\b\d{1,3}(?:[.,]\d{3})+|\b\d+[.,]?\d*\s*(?:€|euros|millones|miles))', t))
+    econ_word = _has_any(t, ["inflación","ipc","paro","desempleo","pib","salario","hacienda","déficit","deuda","mercado","bolsa","ibex"])
+    if not (has_num or econ_word):
+        return None
+    if any(w in t for w in ECON_UP):
+        return "economia_up"
+    if any(w in t for w in ECON_DOWN):
+        return "economia_down"
+    return "economia"
 
 def final_emoji_deterministic(text: str) -> str:
-    countries = extract_countries_from_text(text)
-    if len(countries) == 1:
-        return COUNTRY_FLAG_MAP.get(countries[0], "📰")
-    topic = classify_topic(text)
-    return TOPIC_EMOJI.get(topic, "📰")
+    t = (text or "").lower()
+
+    # 1) Спорт
+    for rx, key in SPORT_PATTERNS:
+        if rx.search(t):
+            return TOPIC_EMOJI[key]
+    for key, kws in SPORT_KEYWORDS.items():
+        if _has_any(t, kws):
+            return TOPIC_EMOJI[key]
+
+    # 2) Погода
+    for key, kws in CLIMA.items():
+        if _has_any(t, kws):
+            return TOPIC_EMOJI.get(key, TOPIC_EMOJI["clima_general"])
+
+    # 3) Экономика
+    econ = _economy_signal(t)
+    if econ:
+        fl = flags_for_countries(extract_countries_from_text(t))
+        return fl or TOPIC_EMOJI[econ]
+
+    # 4) ЧП
+    for key, kws in SUCE.items():
+        if _has_any(t, kws):
+            fl = flags_for_countries(extract_countries_from_text(t))
+            return fl or TOPIC_EMOJI[key]
+
+    # 5) Технологии / 6) Здоровье
+    if _has_any(t, TEC):
+        fl = flags_for_countries(extract_countries_from_text(t))
+        return fl or TOPIC_EMOJI["tecnologia"]
+    if _has_any(t, SALUD):
+        fl = flags_for_countries(extract_countries_from_text(t))
+        return fl or TOPIC_EMOJI["salud"]
+
+    # 7) Политика
+    if _has_any(t, ["gobierno","congreso","senado","ministro","presidente","decreto","ley","elecciones","coalición","tribunal"]):
+        fl = flags_for_countries(extract_countries_from_text(t))
+        return fl or TOPIC_EMOJI["politica"]
+
+    # 8) Международка
+    fl = flags_for_countries(extract_countries_from_text(t))
+    if fl:
+        return fl
+
+    # 9) Дефолт
+    return TOPIC_EMOJI["default"]
 
 # --------------------- OPENAI HELPERS -------------------------
 async def openai_chat(messages, model="gpt-4o-mini", temperature=0.2, max_tokens=500, retries=2):
@@ -503,6 +571,112 @@ def is_event_key_dup(new_key: str, keys: deque, ratio: float = 0.86) -> bool:
             return True
     return False
 
+# ------------------------- EVENTS CLUSTER (48h) -----------------
+def now_ts() -> int:
+    return int(time.time())
+
+def cleanup_event_cluster(cluster: dict):
+    cutoff = now_ts() - EVENT_CLUSTER_TTL_SEC
+    dead = [k for k, v in cluster.items() if v.get("ts", 0) < cutoff]
+    for k in dead:
+        cluster.pop(k, None)
+
+def is_same_event_recent(new_slug: str, cluster: dict, sim_ratio: float = 0.90) -> bool:
+    if new_slug in cluster:
+        if now_ts() - cluster[new_slug].get("ts", 0) <= EVENT_CLUSTER_TTL_SEC:
+            return True
+    for old in cluster.keys():
+        if difflib.SequenceMatcher(None, new_slug, old).ratio() >= sim_ratio:
+            if now_ts() - cluster[old].get("ts", 0) <= EVENT_CLUSTER_TTL_SEC:
+                return True
+    return False
+
+def register_event(new_slug: str, url: str, title: str, cluster: dict):
+    cluster[new_slug] = {"ts": now_ts(), "url": url, "title": title}
+
+def titles_near_dup(a: str, b: str, ratio: float = 0.88) -> bool:
+    a = normalize_title(a)
+    b = normalize_title(b)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    return difflib.SequenceMatcher(None, a, b).ratio() >= ratio
+
+# ---------------------- IMAGES (умный выбор) --------------------
+BAD_IMG_HINTS = ["logo","icon","placeholder","default","sprite","avatar","amp","mini","thumb","svg"]
+PREF_EXT = (".jpg",".jpeg",".png",".webp")
+AVOID_EXT = (".gif",".svg",".ico")
+
+def _score_url_quality(u: str) -> int:
+    url = u.lower()
+    score = 0
+    if url.endswith(PREF_EXT): score += 15
+    if url.endswith(AVOID_EXT): score -= 50
+    m = re.search(r'(?:(?:w|width|ancho)=|/)(\d{3,4})(?:[x_](\d{3,4}))?', url)
+    if m:
+        w = int(m.group(1))
+        h = int(m.group(2)) if m.group(2) else w
+        score += min(w, h) // 10  # ~70 очков за 700px
+    if any(hint in url for hint in BAD_IMG_HINTS): score -= 30
+    if "og:image" in url or "twitter" in url: score += 10
+    if url.startswith("data:") or len(url) < 10: score -= 100
+    return score
+
+def _gather_entry_images(entry) -> list[str]:
+    out = []
+    try:
+        mc = entry.get("media_content", [])
+        for it in mc:
+            if it.get("url"): out.append(it["url"])
+    except Exception: pass
+    try:
+        mt = entry.get("media_thumbnail", [])
+        for it in mt:
+            if it.get("url"): out.append(it["url"])
+    except Exception: pass
+    for l in entry.get("links", []):
+        if l.get("type", "").startswith("image/") and l.get("href"):
+            out.append(l["href"])
+    for field in ("summary", "summary_detail"):
+        html_blob = entry.get(field, "") or ""
+        for m in re.finditer(r'<img[^>]+src=["\']([^"\']+)["\']', str(html_blob), re.I):
+            out.append(m.group(1))
+    return list(dict.fromkeys(out))
+
+def _gather_html_images(page_html: str) -> list[str]:
+    if not page_html: return []
+    html_norm = page_html
+    urls = []
+    for m in re.finditer(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', html_norm, re.I):
+        urls.append(m.group(1) + "?og:image")
+    for m in re.finditer(r'<meta[^>]+name=["\']twitter:image(?::src)?["\'][^>]+content=["\']([^"\']+)["\']', html_norm, re.I):
+        urls.append(m.group(1) + "?twitter:image")
+    for m in re.finditer(r'<img[^>]+src=["\']([^"\']+)["\']', html_norm, re.I):
+        urls.append(m.group(1))
+    return list(dict.fromkeys(urls))
+
+def extract_image(entry, page_html: str = "") -> str:
+    candidates = _gather_entry_images(entry) + _gather_html_images(page_html)
+    normed = []
+    for u in candidates:
+        if not u: continue
+        if u.startswith("//"):
+            u = "https:" + u
+        normed.append(u)
+    normed = list(dict.fromkeys(normed))
+    normed.sort(key=_score_url_quality, reverse=True)
+    for u in normed:
+        lu = u.lower()
+        if any(lu.endswith(ext) for ext in AVOID_EXT):
+            continue
+        if any(h in lu for h in BAD_IMG_HINTS):
+            continue
+        if not (lu.endswith((".jpg",".jpeg",".png",".webp"))):
+            continue
+        return u
+    return ""
+
 # ------------------------- TELEGRAM ----------------------------
 async def notify_admin(message: str):
     if not ADMIN_CHAT_ID:
@@ -539,7 +713,7 @@ def feed_priority(url: str) -> int:
         return 10
 
 async def fetch_and_publish():
-    global published_titles, seen_urls, EVENT_FPS, EVENT_KEYS
+    global published_titles, seen_urls, EVENT_FPS, EVENT_KEYS, EVENT_CLUSTER, last_titles_raw
 
     published_count = 0
     feeds_sorted = sorted(RSS_FEEDS, key=feed_priority, reverse=True)
@@ -566,7 +740,7 @@ async def fetch_and_publish():
             if clean_url in seen_urls or norm_title in published_titles:
                 continue
 
-            full_article = get_full_article(clean_url)
+            full_article, page_html = get_full_article(clean_url)
             if not full_article:
                 full_article = getattr(entry, "summary", "") or ""
             if len(full_article.split()) < 80:
@@ -576,6 +750,11 @@ async def fetch_and_publish():
             fp_first_para = first_paragraph(full_article)
             event_key = await make_event_key(title, fp_first_para)
             if is_event_key_dup(event_key, EVENT_KEYS):
+                continue
+
+            # === Кластер событий 48ч ===
+            cleanup_event_cluster(EVENT_CLUSTER)
+            if is_same_event_recent(event_key, EVENT_CLUSTER, sim_ratio=0.90):
                 continue
 
             # === simhash дедуп по событию ===
@@ -605,6 +784,10 @@ async def fetch_and_publish():
                 await notify_admin(f"❌ OpenAI error: {e}")
                 continue
 
+            # Быстрый анти-дубль по заголовку (сырые последние заголовки)
+            if any(titles_near_dup(gpt_title, old) for old in last_titles_raw[-120:]):
+                continue
+
             title_html = f"<b>{safe_html_text(gpt_title)}</b>"
             body = safe_html_text(body)
             body = drop_duplicate_title(title_html, body)
@@ -613,20 +796,18 @@ async def fetch_and_publish():
             if is_jaccard_dup(body):
                 continue
 
-            # Скрытая ссылка в ключевом слове
-            body = mask_link_in_body(body, clean_url)
-
-            # Эмодзи — строго по правилам бота
+            # Эмодзи — детерминированный, с мульти-флагами
             emoji = final_emoji_deterministic(gpt_title + " " + body)
 
-            # Хвост: теги и подпись канала
-            tail_parts = []
+            # Хвост: «Leer más» отдельной строкой, затем теги, затем подпись
+            leer_mas = f'<a href="{html.escape(clean_url)}">Leer más</a>'
+            tail_parts = [leer_mas]
             if tags:
                 tail_parts.append(tags.lower())
             tail_parts.append(CHANNEL_SIGNATURE)
-            tail = "\n\n".join(tail_parts)
+            tail = "\n".join(tail_parts)
 
-            image_url = extract_image(entry)
+            image_url = extract_image(entry, page_html)
             head = f"{emoji} {title_html}\n\n"
 
             if image_url:
@@ -646,11 +827,15 @@ async def fetch_and_publish():
                 if fp:
                     EVENT_FPS.append(fp)
                 EVENT_KEYS.append(event_key)
+                register_event(event_key, clean_url, gpt_title, EVENT_CLUSTER)
 
                 save_set(CACHE_URLS, seen_urls)
                 save_set(CACHE_TITLES, published_titles)
                 save_fps(CACHE_FPS, EVENT_FPS)
                 save_list(CACHE_EVENT_KEYS, list(EVENT_KEYS))
+                save_dict(CACHE_EVENT_CLUSTER, EVENT_CLUSTER)
+                last_titles_raw.append(gpt_title)
+                save_list(CACHE_LAST_TITLES, last_titles_raw, maxlen=300)
 
                 recent_summaries_for_gpt.append((full_article[:600]).replace("\n", " "))
                 RECENT_BODIES.append(normalize_tokens_for_jaccard(body))
