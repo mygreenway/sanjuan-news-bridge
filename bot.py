@@ -1,11 +1,6 @@
 # -*- coding: utf-8 -*-
-# Noticias España Bot — main.py (v1.4)
-# - Короткий текст 450–550 символов, 2–3 абзаца
-# - Ссылка на источник вшита в ключевое слово текста (без "подробнее")
-# - Перед подписью канала ровно один пустой рядок
-# - Картинка скачивается и отправляется как фото
-# - Без большого превью (disable_web_page_preview=True)
-# - Асинхронно под python-telegram-bot v20.x
+# Noticias España Bot — main.py (v1.6: full sleep at night)
+# Ночью (по Мадриду) бот полностью спит до 07:00.
 
 import os
 import re
@@ -16,7 +11,7 @@ import asyncio
 import logging
 import hashlib
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from urllib.parse import urlparse, urlunparse, urljoin
 
 import feedparser
@@ -25,14 +20,22 @@ import trafilatura
 from telegram import Bot, InputFile
 from telegram.constants import ParseMode
 from openai import OpenAI
+from zoneinfo import ZoneInfo
 
 # ===================== CONFIG =====================
 CHANNEL = "@NoticiasEspanaHoy"
-CHECK_INTERVAL_MIN = 30
 DB_PATH = "state.db"
 HTTP_TIMEOUT = 15
-USER_AGENT = "NoticiasEspanaBot/1.4 (+https://t.me/NoticiasEspanaHoy)"
+CHECK_INTERVAL_MIN = 30                       # интервал опроса днём
+USER_AGENT = "NoticiasEspanaBot/1.6 (+https://t.me/NoticiasEspanaHoy)"
 OPENAI_MODEL = "gpt-4o-mini"
+
+# Полное «сна» по Мадриду:
+MADRID_TZ = ZoneInfo("Europe/Madrid")
+QUIET_START_H = 0                             # с 00:00
+QUIET_END_H = 8                               # до 07:00 (не включая)
+MAX_POSTS_PER_HOUR = 6
+TOP_K_PER_CYCLE = 3
 
 RSS_FEEDS = [
     "https://elpais.com/rss/elpais/portada.xml",
@@ -45,20 +48,46 @@ RSS_FEEDS = [
     "https://www.lasprovincias.es/rss/2.0/portada",
 ]
 
+# Ключевые слова/скоринг
+ALICANTE_KEYWORDS = {
+    "alicante","alacant","costa blanca","benidorm","torrevieja","elche","elx","denia","dénia",
+    "javea","xàbia","calpe","calp","santa pola","el campello","campello","villajoyosa",
+    "la vila joiosa","san juan","sant joan","san vicente","sant vicent","mutxamel","muchamiel",
+    "benissa","altea","guardamar","orihuela","orihuela costa","finestrat"
+}
+EVENT_KEYWORDS = {
+    "fiesta","festival","concierto","evento","feria","mercado","mercadillo","verbena",
+    "fuegos artificiales","hogueras","noche","discoteca","club","dj","concurso","exposición",
+    "agenda","programación","acto","actos","acto público"
+}
+EXPAT_KEYWORDS = {
+    "alquiler","alquileres","vivienda","hipoteca","piso","apartamento","inquilino","desahucio",
+    "suministros","luz","agua","basura","comunidad",
+    "nie","n.i.e","empadronamiento","extranjería","residencia","permiso","нacionalidad",
+    "cita previa","tasa","policía nacional","seguridad social",
+    "empleo","trabajo","salario","smi","autónomo","autónomos","impuestos","hacienda",
+    "dgt","multa","tráfico","trafico","renfe","bus","metro","tram","bono","descuento",
+    "salud","sanidad","centro de salud","colegio","escuela","universidad",
+    "policía","guardia civil","robo","estafa","alerta","temporal","ola de calor","incendio"
+}
+PRIORITY_DOMAINS = {
+    "informacion.es","levante-emv.com","lasprovincias.es",
+    "alicante.es","benidorm.org","torrevieja.es","elche.es"
+}
+
 # ===================== LOGGING =====================
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("noticias-espana")
 
 # ===================== DB =====================
 def sha256(s: str) -> str:
-    return hashlib.sha256(s.encode("utf-8", "ignore")).hexdigest()
+    import hashlib as _h
+    return _h.sha256(s.encode("utf-8", "ignore")).hexdigest()
 
 def normalize_url(u: str) -> str:
     try:
         p = urlparse(u)
-        clean_query = "&".join(
-            sorted([q for q in p.query.split("&") if q and not q.lower().startswith(("utm_", "fbclid"))])
-        )
+        clean_query = "&".join(sorted([q for q in p.query.split("&") if q and not q.lower().startswith(("utm_", "fbclid"))]))
         return urlunparse(p._replace(query=clean_query))
     except Exception:
         return u
@@ -103,12 +132,24 @@ def mark_seen(url: str, title: str):
     conn.close()
 
 def cleanup_db(days: int = 7):
-    cutoff = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp())
+    cutoff = int((datetime.now(MADRID_TZ) - timedelta(days=days)).timestamp())
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("DELETE FROM posts WHERE created_at < ?", (cutoff,))
     conn.commit()
     conn.close()
+
+def posts_count_this_hour_madrid() -> int:
+    now = datetime.now(MADRID_TZ)
+    start = now.replace(minute=0, second=0, microsecond=0)
+    ts_start = int(start.timestamp())
+    ts_end = ts_start + 3600
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM posts WHERE created_at BETWEEN ? AND ?", (ts_start, ts_end))
+    n = c.fetchone()[0]
+    conn.close()
+    return n
 
 # ===================== HTTP & PARSING =====================
 session = requests.Session()
@@ -158,11 +199,8 @@ def download_image(url: str, referer: str | None = None) -> bytes | None:
         if r.status_code != 200:
             return None
         ctype = r.headers.get("Content-Type", "").lower()
-        # Предпочтение JPG/PNG (WEBP иногда не поддерживается в sendPhoto)
         if not any(x in ctype for x in ("image/jpeg", "image/jpg", "image/png")):
-            # попытка конвертировать webp не реализована — отбрасываем
             return None
-        # отсечь иконки
         if len(r.content) < 10000:
             return None
         return r.content
@@ -208,10 +246,9 @@ def translate_and_summarize(title_es: str, body_es: str) -> tuple[str, str]:
     except Exception as e:
         log.warning(f"Body summarize error: {e}")
         body_ru = ""
-
     return title_ru, body_ru
 
-# ===================== LINK-IN-TEXT HELPERS =====================
+# ===================== LINK-IN-TEXT =====================
 RU_STOPWORDS = {
     "это","как","так","его","ее","её","она","они","оно","когда","после","до","для",
     "чтобы","своих","свой","свои","может","будет","были","быть","при","где","который",
@@ -220,22 +257,18 @@ RU_STOPWORDS = {
 }
 
 def pick_anchor_word(title_ru: str, body_ru: str) -> str | None:
-    """Выбираем значимое слово из заголовка/первого абзаца и ищем его в тексте."""
     first_para = body_ru.split("\n", 1)[0]
     pool = f"{title_ru} {first_para}"
-    # слова длиной >=5, только буквы/дефис
     words = re.findall(r"[А-Яа-яЁёA-Za-z\-]{5,}", pool)
     for w in sorted(words, key=len, reverse=True):
         lw = w.lower().strip("-")
         if lw in RU_STOPWORDS:
             continue
-        # анкер должен встречаться в теле
         if re.search(rf"(?i)\b{re.escape(w)}\b", body_ru):
             return w
     return None
 
 def inject_link_into_text(body_ru: str, source_url: str, anchor_word: str | None) -> str:
-    """Заменяем первое вхождение ключевого слова на ссылку."""
     if not anchor_word:
         return body_ru
     pattern = re.compile(rf"(?i)\b{re.escape(anchor_word)}\b")
@@ -246,7 +279,6 @@ def inject_link_into_text(body_ru: str, source_url: str, anchor_word: str | None
 
 # ===================== TEXT FORMAT =====================
 def smart_trim(body: str, lo: int = 450, hi: int = 550) -> str:
-    """Обрезка по предложениям в заданный диапазон, не теряя сути."""
     text = re.sub(r"\s+\n", "\n", body).strip()
     text = re.sub(r"\n{3,}", "\n\n", text)
     if len(text) <= hi:
@@ -261,7 +293,6 @@ def format_post(title_ru: str, body_ru: str, source_url: str) -> str:
     body_ru = smart_trim(body_ru, 450, 550)
     anchor = pick_anchor_word(title_ru, body_ru)
     body_linked = inject_link_into_text(body_ru, source_url, anchor)
-    # Заголовок → текст → (одна пустая строка) → подпись канала
     return (
         f"<b>{html.escape(title_ru.strip())}</b>\n\n"
         f"{body_linked}\n\n"
@@ -269,13 +300,41 @@ def format_post(title_ru: str, body_ru: str, source_url: str) -> str:
     ).strip()
 
 def trim_caption(text: str, limit: int = 950) -> str:
-    """Запас от 1024, чтобы не ломать HTML-теги в подписи фото."""
     if len(text) <= limit:
         return text
     clean = re.sub(r"\s+", " ", text).strip()
     return clean[: limit - 1] + "…"
 
-# ===================== TELEGRAM (ASYNC) =====================
+# ===================== SCORING =====================
+def domain_root(url: str) -> str:
+    try:
+        host = urlparse(url).netloc.lower()
+        if host.startswith("www."):
+            host = host[4:]
+        parts = host.split(".")
+        if len(parts) >= 3 and len(parts[-1]) <= 3:
+            return ".".join(parts[-2:])
+        return host
+    except Exception:
+        return ""
+
+def text_score(s: str, words: set[str]) -> int:
+    s_low = s.lower()
+    return sum(1 for w in words if w in s_low)
+
+def compute_score(title: str, summary: str, url: str) -> int:
+    score = 0
+    s = f"{title}\n{summary}".lower()
+    score += 5 * text_score(s, ALICANTE_KEYWORDS)
+    score += 4 * text_score(s, EVENT_KEYWORDS)
+    score += 3 * text_score(s, EXPAT_KEYWORDS)
+    if domain_root(url) in PRIORITY_DOMAINS:
+        score += 2
+    if len(title.strip()) >= 6:
+        score += 1
+    return score
+
+# ===================== TELEGRAM =====================
 async def send_with_image(bot: Bot, text: str, image_bytes: bytes | None):
     if image_bytes:
         try:
@@ -294,7 +353,7 @@ async def send_with_image(bot: Bot, text: str, image_bytes: bytes | None):
             chat_id=CHANNEL,
             text=text,
             parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,   # без большого баннера
+            disable_web_page_preview=True,
             disable_notification=True,
         )
         return True
@@ -302,7 +361,7 @@ async def send_with_image(bot: Bot, text: str, image_bytes: bytes | None):
         log.error(f"send_message error: {e}")
         return False
 
-# ===================== PIPELINE (ASYNC) =====================
+# ===================== PIPELINE =====================
 async def process_entry(bot: Bot, entry):
     url = normalize_url(entry.get("link") or entry.get("id") or "")
     title = (entry.get("title") or "").strip()
@@ -322,7 +381,6 @@ async def process_entry(bot: Bot, entry):
         title_ru = title
 
     post_text = format_post(title_ru, body_ru, url)
-
     image_bytes = download_image(img_url, referer=url) if img_url else None
     await send_with_image(bot, post_text, image_bytes)
 
@@ -330,17 +388,59 @@ async def process_entry(bot: Bot, entry):
     log.info(f"Published: {title_ru}")
 
 async def check_feeds_once(bot: Bot):
+    candidates = []
     for feed_url in RSS_FEEDS:
         try:
             f = feedparser.parse(feed_url)
-            if not f.entries:
-                continue
-            for e in list(f.entries)[-10:]:
-                await process_entry(bot, e)
-        except Exception as e:
-            log.warning(f"Feed error {feed_url}: {e}")
+            for e in list(f.entries)[-12:]:
+                url = normalize_url(e.get("link") or e.get("id") or "")
+                title = (e.get("title") or "").strip()
+                if not url or not title:
+                    continue
+                if seen(url, title):
+                    continue
+                summary = (e.get("summary") or e.get("description") or "").strip()
+                sc = compute_score(title, summary, url)
+                candidates.append((sc, e))
+        except Exception as ex:
+            log.warning(f"Feed error {feed_url}: {ex}")
 
-# ===================== MAIN LOOP =====================
+    candidates.sort(key=lambda x: x[0], reverse=True)
+
+    published = 0
+    for sc, e in candidates:
+        if sc <= 0:
+            continue
+        # часовой лимит
+        if posts_count_this_hour_madrid() >= MAX_POSTS_PER_HOUR:
+            break
+        await process_entry(bot, e)
+        published += 1
+        if published >= TOP_K_PER_CYCLE:
+            break
+
+# ===================== SCHEDULER =====================
+def now_madrid() -> datetime:
+    return datetime.now(MADRID_TZ)
+
+def seconds_until_wakeup() -> int:
+    """Сколько секунд спать до следующего 07:00 по Мадриду."""
+    now = now_madrid()
+    today_wakeup = now.replace(hour=QUIET_END_H, minute=0, second=0, microsecond=0)
+    if now < today_wakeup:
+        target = today_wakeup
+    else:
+        target = (now + timedelta(days=1)).replace(hour=QUIET_END_H, minute=0, second=0, microsecond=0)
+    return max(1, int((target - now).total_seconds()))
+
+def is_quiet_now() -> bool:
+    h = now_madrid().hour
+    # интервал [QUIET_START_H, QUIET_END_H)
+    if QUIET_START_H <= QUIET_END_H:
+        return QUIET_START_H <= h < QUIET_END_H
+    # на случай "через полночь"
+    return h >= QUIET_START_H or h < QUIET_END_H
+
 async def scheduler():
     tg_token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not tg_token:
@@ -349,18 +449,21 @@ async def scheduler():
         raise RuntimeError("OPENAI_API_KEY is not set")
 
     bot = Bot(token=tg_token)
-
     ensure_db()
     cleanup_db(days=7)
-
     log.info("Noticias España Bot started")
 
-    await check_feeds_once(bot)
-
     while True:
-        await asyncio.sleep(CHECK_INTERVAL_MIN * 60)
+        if is_quiet_now():
+            secs = seconds_until_wakeup()
+            hrs = round(secs / 3600, 2)
+            log.info(f"Quiet hours in Madrid. Sleeping for ~{hrs}h until {QUIET_END_H:02d}:00.")
+            await asyncio.sleep(secs)
+            continue
+
         await check_feeds_once(bot)
         cleanup_db(days=7)
+        await asyncio.sleep(CHECK_INTERVAL_MIN * 60)
 
 def main():
     try:
