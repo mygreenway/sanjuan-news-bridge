@@ -37,15 +37,16 @@ QUIET_END_H = 8                               # до 07:00 (не включая)
 MAX_POSTS_PER_HOUR = 6
 TOP_K_PER_CYCLE = 3
 
-RSS_FEEDS = [
-    "https://elpais.com/rss/elpais/portada.xml",
-    "https://e00-elmundo.uecdn.es/elmundo/rss/portada.xml",
-    "https://www.20minutos.es/rss/",
-    "https://www.abc.es/rss/feeds/abc_ultima.xml",
+   RSS_FEEDS = [
+    # Национальный минимум
     "https://www.rtve.es/api/rss/portada",
+
+    # Региональные и локальные (Comunidad Valenciana + Alicante)
+    "https://www.20minutos.es/rss/comunidad-valenciana/",
     "https://www.informacion.es/rss/section/1056",
     "https://www.levante-emv.com/rss/section/13069",
     "https://www.lasprovincias.es/rss/2.0/portada",
+    "https://www.alicante.es/es/noticias/rss", 
 ]
 
 # Ключевые слова/скоринг
