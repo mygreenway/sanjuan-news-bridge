@@ -1,12 +1,17 @@
 # -*- coding: utf-8 -*-
-# Noticias España Bot — main.py (v1.3: short body 450–550, image upload, no preview)
+# Noticias España Bot — main.py (v1.4)
+# - Короткий текст 450–550 символов, 2–3 абзаца
+# - Ссылка на источник вшита в ключевое слово текста (без "подробнее")
+# - Перед подписью канала ровно один пустой рядок
+# - Картинка скачивается и отправляется как фото
+# - Без большого превью (disable_web_page_preview=True)
+# - Асинхронно под python-telegram-bot v20.x
 
 import os
 import re
 import io
 import html
 import time
-import math
 import asyncio
 import logging
 import hashlib
@@ -23,10 +28,10 @@ from openai import OpenAI
 
 # ===================== CONFIG =====================
 CHANNEL = "@NoticiasEspanaHoy"
-CHECK_INTERVAL_MIN = 30                  # минут
+CHECK_INTERVAL_MIN = 30
 DB_PATH = "state.db"
 HTTP_TIMEOUT = 15
-USER_AGENT = "NoticiasEspanaBot/1.3 (+https://t.me/NoticiasEspanaHoy)"
+USER_AGENT = "NoticiasEspanaBot/1.4 (+https://t.me/NoticiasEspanaHoy)"
 OPENAI_MODEL = "gpt-4o-mini"
 
 RSS_FEEDS = [
@@ -51,7 +56,9 @@ def sha256(s: str) -> str:
 def normalize_url(u: str) -> str:
     try:
         p = urlparse(u)
-        clean_query = "&".join(sorted([q for q in p.query.split("&") if q and not q.lower().startswith(("utm_", "fbclid"))]))
+        clean_query = "&".join(
+            sorted([q for q in p.query.split("&") if q and not q.lower().startswith(("utm_", "fbclid"))])
+        )
         return urlunparse(p._replace(query=clean_query))
     except Exception:
         return u
@@ -88,8 +95,10 @@ def mark_seen(url: str, title: str):
     title_h = sha256(title.strip().lower())
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO posts(url_hash, title_hash, source_url, title, created_at) VALUES (?,?,?,?,?)",
-              (url_h, title_h, url, title, int(time.time())))
+    c.execute(
+        "INSERT OR IGNORE INTO posts(url_hash, title_hash, source_url, title, created_at) VALUES (?,?,?,?,?)",
+        (url_h, title_h, url, title, int(time.time()))
+    )
     conn.commit()
     conn.close()
 
@@ -101,12 +110,15 @@ def cleanup_db(days: int = 7):
     conn.commit()
     conn.close()
 
-# ===================== HTTP =====================
+# ===================== HTTP & PARSING =====================
 session = requests.Session()
 session.headers.update({"User-Agent": USER_AGENT})
 
-def http_get(url: str) -> requests.Response:
-    return session.get(url, timeout=HTTP_TIMEOUT, allow_redirects=True)
+def http_get(url: str, extra_headers: dict | None = None) -> requests.Response:
+    headers = session.headers.copy()
+    if extra_headers:
+        headers.update(extra_headers)
+    return session.get(url, headers=headers, timeout=HTTP_TIMEOUT, allow_redirects=True)
 
 def absolutize(src: str, base: str) -> str:
     try:
@@ -115,17 +127,15 @@ def absolutize(src: str, base: str) -> str:
         return src
 
 def extract_main_image(html_text: str, base_url: str) -> str | None:
-    # og:image
-    m = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', html_text, re.IGNORECASE)
-    if m:
-        return absolutize(m.group(1), base_url)
-    # twitter:image
-    m = re.search(r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']', html_text, re.IGNORECASE)
-    if m:
-        return absolutize(m.group(1), base_url)
-    # первая <img>
-    m = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', html_text, re.IGNORECASE)
-    return absolutize(m.group(1), base_url) if m else None
+    for pattern in [
+        r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+        r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']',
+        r'<img[^>]+src=["\']([^"\']+)["\']',
+    ]:
+        m = re.search(pattern, html_text, re.IGNORECASE)
+        if m:
+            return absolutize(m.group(1), base_url)
+    return None
 
 def extract_text_and_image(url: str) -> tuple[str | None, str | None]:
     try:
@@ -139,20 +149,22 @@ def extract_text_and_image(url: str) -> tuple[str | None, str | None]:
         log.warning(f"extract_text_and_image error: {e}")
         return None, None
 
-def download_image(url: str) -> bytes | None:
+def download_image(url: str, referer: str | None = None) -> bytes | None:
     if not url:
         return None
     try:
-        r = http_get(url)
+        headers = {"Referer": referer} if referer else None
+        r = http_get(url, headers)
         if r.status_code != 200:
             return None
         ctype = r.headers.get("Content-Type", "").lower()
-        if not any(x in ctype for x in ("image/jpeg", "image/jpg", "image/png", "image/webp")):
+        # Предпочтение JPG/PNG (WEBP иногда не поддерживается в sendPhoto)
+        if not any(x in ctype for x in ("image/jpeg", "image/jpg", "image/png")):
+            # попытка конвертировать webp не реализована — отбрасываем
             return None
-        # минимальный размер ~20KB, чтобы отсечь иконки
-        if int(r.headers.get("Content-Length", "40000")) < 20000:
-            if len(r.content) < 20000:
-                return None
+        # отсечь иконки
+        if len(r.content) < 10000:
+            return None
         return r.content
     except Exception:
         return None
@@ -199,33 +211,65 @@ def translate_and_summarize(title_es: str, body_es: str) -> tuple[str, str]:
 
     return title_ru, body_ru
 
+# ===================== LINK-IN-TEXT HELPERS =====================
+RU_STOPWORDS = {
+    "это","как","так","его","ее","её","она","они","оно","когда","после","до","для",
+    "чтобы","своих","свой","свои","может","будет","были","быть","при","где","который",
+    "которые","также","этот","эта","эти","что","или","и","а","но","на","в","из","по",
+    "под","над","от","до","без","у","про","же","ли","мы","вы","он","я","их","между"
+}
+
+def pick_anchor_word(title_ru: str, body_ru: str) -> str | None:
+    """Выбираем значимое слово из заголовка/первого абзаца и ищем его в тексте."""
+    first_para = body_ru.split("\n", 1)[0]
+    pool = f"{title_ru} {first_para}"
+    # слова длиной >=5, только буквы/дефис
+    words = re.findall(r"[А-Яа-яЁёA-Za-z\-]{5,}", pool)
+    for w in sorted(words, key=len, reverse=True):
+        lw = w.lower().strip("-")
+        if lw in RU_STOPWORDS:
+            continue
+        # анкер должен встречаться в теле
+        if re.search(rf"(?i)\b{re.escape(w)}\b", body_ru):
+            return w
+    return None
+
+def inject_link_into_text(body_ru: str, source_url: str, anchor_word: str | None) -> str:
+    """Заменяем первое вхождение ключевого слова на ссылку."""
+    if not anchor_word:
+        return body_ru
+    pattern = re.compile(rf"(?i)\b{re.escape(anchor_word)}\b")
+    def repl(m):
+        word = m.group(0)
+        return f'<a href="{html.escape(source_url)}">{word}</a>'
+    return pattern.sub(repl, body_ru, count=1)
+
 # ===================== TEXT FORMAT =====================
 def smart_trim(body: str, lo: int = 450, hi: int = 550) -> str:
-    """Обрезка по предложениям в диапазон символов, не теряя сути."""
+    """Обрезка по предложениям в заданный диапазон, не теряя сути."""
     text = re.sub(r"\s+\n", "\n", body).strip()
     text = re.sub(r"\n{3,}", "\n\n", text)
     if len(text) <= hi:
         return text
-    # Обрезаем мягко по последней точке в окне [lo, hi]
     window = text[:hi]
     end = max(window.rfind("."), window.rfind("!"), window.rfind("?"))
-    if end >= lo * 0.6:  # не слишком рано
+    if end >= max(int(lo * 0.6), 200):
         return window[: end + 1].strip()
-    # fallback: жёсткая обрезка
     return text[: hi - 1].rstrip() + "…"
 
 def format_post(title_ru: str, body_ru: str, source_url: str) -> str:
     body_ru = smart_trim(body_ru, 450, 550)
-    body_with_link = body_ru.rstrip() + f' <a href="{html.escape(source_url)}">подробнее</a>'
-    parts = [
-        f"<b>{html.escape(title_ru.strip())}</b>\n",
-        body_with_link.strip(),
-        '\n\n<a href="https://t.me/NoticiasEspanaHoy">Новости Испания 🇪🇸</a>',
-    ]
-    return "\n".join(parts).strip()
+    anchor = pick_anchor_word(title_ru, body_ru)
+    body_linked = inject_link_into_text(body_ru, source_url, anchor)
+    # Заголовок → текст → (одна пустая строка) → подпись канала
+    return (
+        f"<b>{html.escape(title_ru.strip())}</b>\n\n"
+        f"{body_linked}\n\n"
+        f'<a href="https://t.me/NoticiasEspanaHoy">Новости Испания 🇪🇸</a>'
+    ).strip()
 
 def trim_caption(text: str, limit: int = 950) -> str:
-    """Запас до 1024, чтобы не сломать теги."""
+    """Запас от 1024, чтобы не ломать HTML-теги в подписи фото."""
     if len(text) <= limit:
         return text
     clean = re.sub(r"\s+", " ", text).strip()
@@ -245,13 +289,12 @@ async def send_with_image(bot: Bot, text: str, image_bytes: bytes | None):
             return True
         except Exception as e:
             log.warning(f"send_photo failed, fallback to text: {e}")
-    # текст без большого превью
     try:
         await bot.send_message(
             chat_id=CHANNEL,
             text=text,
             parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,   # <— без баннера
+            disable_web_page_preview=True,   # без большого баннера
             disable_notification=True,
         )
         return True
@@ -280,7 +323,7 @@ async def process_entry(bot: Bot, entry):
 
     post_text = format_post(title_ru, body_ru, url)
 
-    image_bytes = download_image(img_url) if img_url else None
+    image_bytes = download_image(img_url, referer=url) if img_url else None
     await send_with_image(bot, post_text, image_bytes)
 
     mark_seen(url, title)
