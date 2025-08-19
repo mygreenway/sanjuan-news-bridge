@@ -1,31 +1,32 @@
 # -*- coding: utf-8 -*-
-# Noticias España Bot — main.py (async fix for PTB v20)
+# Noticias España Bot — main.py (v1.3: short body 450–550, image upload, no preview)
 
 import os
 import re
+import io
 import html
 import time
+import math
 import asyncio
 import logging
 import hashlib
 import sqlite3
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse, urlunparse, urljoin
 
 import feedparser
 import requests
 import trafilatura
-from telegram import Bot
+from telegram import Bot, InputFile
 from telegram.constants import ParseMode
-
 from openai import OpenAI
 
-# ---------------------------- CONFIG ----------------------------
+# ===================== CONFIG =====================
 CHANNEL = "@NoticiasEspanaHoy"
-CHECK_INTERVAL_MIN = 30
+CHECK_INTERVAL_MIN = 30                  # минут
 DB_PATH = "state.db"
 HTTP_TIMEOUT = 15
-USER_AGENT = "NoticiasEspanaBot/1.0 (+https://t.me/NoticiasEspanaHoy)"
+USER_AGENT = "NoticiasEspanaBot/1.3 (+https://t.me/NoticiasEspanaHoy)"
 OPENAI_MODEL = "gpt-4o-mini"
 
 RSS_FEEDS = [
@@ -39,11 +40,11 @@ RSS_FEEDS = [
     "https://www.lasprovincias.es/rss/2.0/portada",
 ]
 
-# ---------------------------- LOGGING ----------------------------
+# ===================== LOGGING =====================
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("noticias-espana")
 
-# ---------------------------- DB ----------------------------
+# ===================== DB =====================
 def sha256(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8", "ignore")).hexdigest()
 
@@ -100,39 +101,70 @@ def cleanup_db(days: int = 7):
     conn.commit()
     conn.close()
 
-# ---------------------------- HTTP ----------------------------
+# ===================== HTTP =====================
 session = requests.Session()
 session.headers.update({"User-Agent": USER_AGENT})
 
-def fetch_url(url: str) -> requests.Response:
+def http_get(url: str) -> requests.Response:
     return session.get(url, timeout=HTTP_TIMEOUT, allow_redirects=True)
 
-def extract_main_image(html_text: str) -> str | None:
-    og = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', html_text, re.IGNORECASE)
-    if og:
-        return og.group(1)
-    m = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', html_text, re.IGNORECASE)
-    return m.group(1) if m else None
-
-def extract_text(url: str) -> tuple[str | None, str | None]:
+def absolutize(src: str, base: str) -> str:
     try:
-        r = fetch_url(url)
+        return urljoin(base, src)
+    except Exception:
+        return src
+
+def extract_main_image(html_text: str, base_url: str) -> str | None:
+    # og:image
+    m = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', html_text, re.IGNORECASE)
+    if m:
+        return absolutize(m.group(1), base_url)
+    # twitter:image
+    m = re.search(r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']', html_text, re.IGNORECASE)
+    if m:
+        return absolutize(m.group(1), base_url)
+    # первая <img>
+    m = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', html_text, re.IGNORECASE)
+    return absolutize(m.group(1), base_url) if m else None
+
+def extract_text_and_image(url: str) -> tuple[str | None, str | None]:
+    try:
+        r = http_get(url)
         if r.status_code != 200 or not r.text:
             return None, None
         text = trafilatura.extract(r.text, include_comments=False, include_images=False, url=url)
-        img = extract_main_image(r.text)
+        img = extract_main_image(r.text, url)
         return text, img
     except Exception as e:
-        log.warning(f"extract_text error: {e}")
+        log.warning(f"extract_text_and_image error: {e}")
         return None, None
 
-# ---------------------------- OPENAI ----------------------------
+def download_image(url: str) -> bytes | None:
+    if not url:
+        return None
+    try:
+        r = http_get(url)
+        if r.status_code != 200:
+            return None
+        ctype = r.headers.get("Content-Type", "").lower()
+        if not any(x in ctype for x in ("image/jpeg", "image/jpg", "image/png", "image/webp")):
+            return None
+        # минимальный размер ~20KB, чтобы отсечь иконки
+        if int(r.headers.get("Content-Length", "40000")) < 20000:
+            if len(r.content) < 20000:
+                return None
+        return r.content
+    except Exception:
+        return None
+
+# ===================== OPENAI =====================
 def build_prompt(title_es: str, body_es: str) -> list[dict]:
     system = (
         "Ты переводчик-редактор. Переведи и сожми новость с испанского на русский. "
         "Факты без искажений; цифры/имена/даты сохранить; без домыслов. "
-        "2–4 абзаца, первый НЕ дублирует заголовок по смыслу. Нейтральный стиль. "
-        "Выводи только текст тела без заголовка."
+        "Сделай 2–3 абзаца по 1–2 предложения. Общая длина 450–550 символов. "
+        "Первый абзац НЕ дублирует заголовок по смыслу. Нейтральный стиль. "
+        "Выведи только текст тела без заголовка."
     )
     user = f"Заголовок (ES): {title_es}\n\nСтатья (ES):\n{body_es[:8000]}"
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
@@ -167,49 +199,67 @@ def translate_and_summarize(title_es: str, body_es: str) -> tuple[str, str]:
 
     return title_ru, body_ru
 
-# ---------------------------- FORMAT ----------------------------
+# ===================== TEXT FORMAT =====================
+def smart_trim(body: str, lo: int = 450, hi: int = 550) -> str:
+    """Обрезка по предложениям в диапазон символов, не теряя сути."""
+    text = re.sub(r"\s+\n", "\n", body).strip()
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    if len(text) <= hi:
+        return text
+    # Обрезаем мягко по последней точке в окне [lo, hi]
+    window = text[:hi]
+    end = max(window.rfind("."), window.rfind("!"), window.rfind("?"))
+    if end >= lo * 0.6:  # не слишком рано
+        return window[: end + 1].strip()
+    # fallback: жёсткая обрезка
+    return text[: hi - 1].rstrip() + "…"
+
 def format_post(title_ru: str, body_ru: str, source_url: str) -> str:
+    body_ru = smart_trim(body_ru, 450, 550)
+    body_with_link = body_ru.rstrip() + f' <a href="{html.escape(source_url)}">подробнее</a>'
     parts = [
         f"<b>{html.escape(title_ru.strip())}</b>\n",
-        body_ru.strip() if body_ru else "",
-        f'\n\n<a href="{html.escape(source_url)}">Читать источник</a>',
+        body_with_link.strip(),
         '\n\n<a href="https://t.me/NoticiasEspanaHoy">Новости Испания 🇪🇸</a>',
     ]
-    return "\n".join([p for p in parts if p]).strip()
+    return "\n".join(parts).strip()
 
-def trim_for_caption(text: str, limit: int = 1024) -> str:
+def trim_caption(text: str, limit: int = 950) -> str:
+    """Запас до 1024, чтобы не сломать теги."""
     if len(text) <= limit:
         return text
     clean = re.sub(r"\s+", " ", text).strip()
-    if len(clean) <= limit:
-        return clean
     return clean[: limit - 1] + "…"
 
-# ---------------------------- PUBLISH (ASYNC) ----------------------------
-async def post_to_channel(bot: Bot, text: str, image_url: str | None):
+# ===================== TELEGRAM (ASYNC) =====================
+async def send_with_image(bot: Bot, text: str, image_bytes: bytes | None):
+    if image_bytes:
+        try:
+            await bot.send_photo(
+                chat_id=CHANNEL,
+                photo=InputFile(io.BytesIO(image_bytes), filename="news.jpg"),
+                caption=trim_caption(text, 950),
+                parse_mode=ParseMode.HTML,
+                disable_notification=True,
+            )
+            return True
+        except Exception as e:
+            log.warning(f"send_photo failed, fallback to text: {e}")
+    # текст без большого превью
     try:
-        if image_url:
-            caption = trim_for_caption(text, 1024)
-            if len(caption) == len(text):
-                await bot.send_photo(
-                    chat_id=CHANNEL,
-                    photo=image_url,
-                    caption=caption,
-                    parse_mode=ParseMode.HTML,
-                    disable_notification=True,
-                )
-                return
         await bot.send_message(
             chat_id=CHANNEL,
             text=text,
             parse_mode=ParseMode.HTML,
-            disable_web_page_preview=False,
+            disable_web_page_preview=True,   # <— без баннера
             disable_notification=True,
         )
+        return True
     except Exception as e:
-        log.error(f"Telegram send error: {e}")
+        log.error(f"send_message error: {e}")
+        return False
 
-# ---------------------------- PIPELINE (ASYNC) ----------------------------
+# ===================== PIPELINE (ASYNC) =====================
 async def process_entry(bot: Bot, entry):
     url = normalize_url(entry.get("link") or entry.get("id") or "")
     title = (entry.get("title") or "").strip()
@@ -218,7 +268,7 @@ async def process_entry(bot: Bot, entry):
     if seen(url, title):
         return
 
-    article_text, image_url = extract_text(url)
+    article_text, img_url = extract_text_and_image(url)
     if not article_text:
         article_text = (entry.get("summary") or entry.get("description") or "").strip()
     if not article_text:
@@ -229,7 +279,9 @@ async def process_entry(bot: Bot, entry):
         title_ru = title
 
     post_text = format_post(title_ru, body_ru, url)
-    await post_to_channel(bot, post_text, image_url)
+
+    image_bytes = download_image(img_url) if img_url else None
+    await send_with_image(bot, post_text, image_bytes)
 
     mark_seen(url, title)
     log.info(f"Published: {title_ru}")
@@ -245,7 +297,7 @@ async def check_feeds_once(bot: Bot):
         except Exception as e:
             log.warning(f"Feed error {feed_url}: {e}")
 
-# ---------------------------- MAIN LOOP ----------------------------
+# ===================== MAIN LOOP =====================
 async def scheduler():
     tg_token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not tg_token:
