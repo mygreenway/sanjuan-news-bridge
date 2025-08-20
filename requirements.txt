@@ -3,3 +3,4 @@ python-telegram-bot==20.3
 requests==2.31.0
 feedparser
 trafilatura==1.6.1
+Pillow
