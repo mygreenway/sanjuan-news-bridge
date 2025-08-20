@@ -26,7 +26,7 @@ from zoneinfo import ZoneInfo
 CHANNEL = "@NoticiasEspanaHoy"
 DB_PATH = "state.db"
 HTTP_TIMEOUT = 15
-CHECK_INTERVAL_MIN = 15                      # ← опрос каждые 60 минут
+CHECK_INTERVAL_MIN = 60                      # ← опрос каждые 60 минут
 USER_AGENT = "NoticiasEspanaBot/1.8 (+https://t.me/NoticiasEspanaHoy)"
 OPENAI_MODEL = "gpt-4o-mini"
 
