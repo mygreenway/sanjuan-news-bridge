@@ -23,7 +23,7 @@ from openai import AsyncOpenAI
 
 # ===================== CONFIG =====================
 CHANNEL = "@NoticiasEspanaHoy"
-CHECK_INTERVAL_MIN = 60   # публикация каждые 60 минут
+CHECK_INTERVAL_MIN = 30   # публикация каждые 60 минут
 DB_PATH = "state.db"
 HTTP_TIMEOUT = 15
 USER_AGENT = "NoticiasEspanaBot/1.4 (+https://t.me/NoticiasEspanaHoy)"
